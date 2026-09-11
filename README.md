@@ -23,6 +23,8 @@ der Heizung. Elektro und Hybrid beginnen mit **900 W**. Bleibt die Bestätigung
 aus, wird ein Fehler angezeigt; eine Transportbestätigung allein zählt nicht
 als erfolgreiche Übernahme. Nach einer Wiederverbindung werden Befehle erst
 nach Abschluss der Geräteabfrage gesendet.
+Antwortet die Heizung noch nicht, werden Energiequellen-Sollwerte höchstens
+dreimal gesendet und jeweils anhand frischer Rückmeldungen geprüft.
 
 Entwickelt wurde die Integration mit einem iNet X an einer **Truma Combi**.
 Andere Truma-Geräte sprechen dasselbe Protokoll, sind aber nicht getestet;
@@ -422,6 +424,8 @@ Radio disconnections may still require reconnection. Energy-source changes
 wait for heater feedback and enter Electric/Hybrid at **900 W**. Missing
 confirmation raises an error; transport acknowledgement alone is not success.
 After reconnecting, commands wait until device discovery has completed.
+Energy-source setpoints are attempted at most three times while the heater
+wakes up, with fresh device feedback checked after each attempt.
 
 [![HACS: custom](https://img.shields.io/badge/HACS-custom-41BDF5.svg)](https://hacs.xyz/docs/faq/custom_repositories)
 [![Validate](https://github.com/tomac01/hass-truma-inetx/actions/workflows/validate.yml/badge.svg)](https://github.com/tomac01/hass-truma-inetx/actions/workflows/validate.yml)

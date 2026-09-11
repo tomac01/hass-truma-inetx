@@ -386,6 +386,33 @@ def test_energy_write_accepts_fresh_device_values_and_holds_after_completion() -
     asyncio.run(case())
 
 
+def test_energy_write_retries_a_sleeping_heater_but_is_bounded() -> None:
+    async def case():
+        coord = _Coord(now=100)
+        coord._state = types.SimpleNamespace(
+            validate_write=lambda *a: (True, ""),
+            get_command_dest=lambda *a: 0x0201,
+        )
+        class Client(_Client):
+            sends = 0
+            async def send(self, frame):
+                self.sends += 1
+                if self.sends == 3:
+                    coord._write_feedback[(0x0201, "EnergySrc", "DieselLevel")] = 1
+                return self.sends >= 3
+        coord._client = Client()
+        coord._write_ready_event.set()
+        original = COORD._WRITE_FEEDBACK_TIMEOUT
+        COORD._WRITE_FEEDBACK_TIMEOUT = 0
+        try:
+            await coord.async_write_many([("EnergySrc", "DieselLevel", 1)], confirm=True)
+        finally:
+            COORD._WRITE_FEEDBACK_TIMEOUT = original
+        assert coord._client.sends == 4  # two writes, each followed by readback
+        assert coord._writes_pending == 0
+    asyncio.run(case())
+
+
 def _main() -> None:
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

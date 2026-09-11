@@ -1034,24 +1034,38 @@ class TrumaCoordinator(DataUpdateCoordinator[TrumaState]):
                         LOGGER.debug(
                             "Truma write %s.%s = %s -> 0x%04X", topic, param, value, dest
                         )
-                        if not await client.send(frame):
-                            raise HomeAssistantError(
-                                f"Truma did not acknowledge write {topic}.{param}={value}"
-                            )
-                        if confirm:
-                            # Request fresh, device-scoped values. A transport
-                            # ACK confirms delivery, not the requested setting.
+                        for attempt in range(3 if confirm else 1):
+                            if confirm:
+                                self._write_feedback.pop((dest, topic, param), None)
+                            acknowledged = await client.send(frame)
+                            if not confirm:
+                                if not acknowledged:
+                                    raise HomeAssistantError(
+                                        f"Truma did not acknowledge write {topic}.{param}={value}"
+                                    )
+                                break
+                            # Heater wake-up can outlast panel registration.
+                            # Only retry idempotent source setpoints, and only
+                            # after checking fresh feedback for the same value.
                             await client.send(build_v3_frame(
                                 dest, client.assigned_addr, CTRL_MBP, MBP_PARAM_DISC, 0, b""
                             ))
                             deadline = self.hass.loop.time() + _WRITE_FEEDBACK_TIMEOUT
-                            while self._write_feedback.get((dest, topic, param)) != value:
-                                if not client.connected or self.hass.loop.time() >= deadline:
-                                    raise HomeAssistantError(
-                                        f"Truma did not confirm {topic}.{param}={value}; "
-                                        "check the panel and try again"
-                                    )
+                            while (
+                                client.connected
+                                and self.hass.loop.time() < deadline
+                                and self._write_feedback.get((dest, topic, param)) != value
+                            ):
                                 await asyncio.sleep(0.1)
+                            if self._write_feedback.get((dest, topic, param)) == value:
+                                break
+                            if not client.connected or attempt == 2:
+                                raise HomeAssistantError(
+                                    f"Truma did not confirm {topic}.{param}={value}; "
+                                    "check the panel and try again"
+                                )
+                            LOGGER.debug("Truma retry %s.%s=%s after missing feedback", topic, param, value)
+                            await asyncio.sleep(2)
                     if confirm:
                         # Let delayed notifications settle before declaring the
                         # complete multi-parameter setting successful.
