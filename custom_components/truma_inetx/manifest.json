@@ -21,12 +21,12 @@
     "frontend",
     "http"
   ],
-  "documentation": "https://github.com/rpodgorny/hass-truma-inetx",
+  "documentation": "https://github.com/tomac01/hass-truma-inetx",
   "integration_type": "device",
   "iot_class": "local_push",
-  "issue_tracker": "https://github.com/rpodgorny/hass-truma-inetx/issues",
+  "issue_tracker": "https://github.com/tomac01/hass-truma-inetx/issues",
   "requirements": [
     "cbor2==5.6.5"
   ],
-  "version": "0.7.2-holly.1"
+  "version": "0.7.3-live.1"
 }
