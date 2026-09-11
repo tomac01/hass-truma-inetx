@@ -6,13 +6,13 @@ cards:
     heading_style: title
     badges:
       - type: entity
-        entity: binary_sensor.truma_inetx_ffb4d1_bluetooth_gateway
-        name: ESP32
+        entity: binary_sensor.truma_inetx_ffb4d1_ble_sender_verbindung
+        name: BLE-Sender
         show_name: true
         show_state: true
       - type: entity
         entity: binary_sensor.truma_inetx_ffb4d1_ble_connection
-        name: Truma
+        name: BLE-Truma
         show_name: true
         show_state: true
       - type: entity

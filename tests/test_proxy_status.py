@@ -211,11 +211,11 @@ def test_proxy_sensor_has_bilingual_names_and_an_icon() -> None:
     english = json.loads((SRC / "translations" / "en.json").read_text())
     german = json.loads((SRC / "translations" / "de.json").read_text())
     strings = json.loads((SRC / "strings.json").read_text())
-    assert german["entity"]["binary_sensor"]["connection"]["name"] == "Truma-Bedienteil"
-    assert german["entity"]["binary_sensor"]["proxy_connection"]["name"] == "Bluetooth-Gateway"
+    assert german["entity"]["binary_sensor"]["connection"]["name"] == "BLE-Truma-Verbindung"
+    assert german["entity"]["binary_sensor"]["proxy_connection"]["name"] == "BLE-Sender-Verbindung"
     for catalogue in (strings, english):
-        assert catalogue["entity"]["binary_sensor"]["connection"]["name"] == "Truma panel"
-        assert catalogue["entity"]["binary_sensor"]["proxy_connection"]["name"] == "Bluetooth gateway"
+        assert catalogue["entity"]["binary_sensor"]["connection"]["name"] == "BLE Truma connection"
+        assert catalogue["entity"]["binary_sensor"]["proxy_connection"]["name"] == "BLE transmitter connection"
     icons = json.loads((SRC / "icons.json").read_text())
     assert icons["entity"]["binary_sensor"]["proxy_connection"]["default"]
 
@@ -224,11 +224,11 @@ def test_readme_and_lovelace_example_keep_both_statuses_distinct() -> None:
     root_readme = (SRC.parents[1] / "README.md").read_text()
     example = (SRC.parents[1] / "examples" / "lovelace" / "truma-controls.yaml").read_text()
     example_readme = (SRC.parents[1] / "examples" / "lovelace" / "README.md").read_text()
-    assert "Bluetooth-Gateway" in root_readme
-    assert "Bluetooth gateway" in root_readme
-    assert "_bluetooth_gateway" in example
-    assert "Truma-Bedienteil" in example_readme
-    assert "Bluetooth-Gateway" in example_readme
+    assert "BLE-Sender-Verbindung" in root_readme
+    assert "BLE transmitter connection" in root_readme
+    assert "_ble_sender_verbindung" in example
+    assert "BLE-Truma-Verbindung" in example_readme
+    assert "BLE-Sender-Verbindung" in example_readme
 
 
 def _main() -> None:

@@ -43,8 +43,8 @@
   },
   "entity": {
     "binary_sensor": {
-      "connection": { "name": "Truma-Bedienteil" },
-      "proxy_connection": { "name": "Bluetooth-Gateway" },
+      "connection": { "name": "BLE-Truma-Verbindung" },
+      "proxy_connection": { "name": "BLE-Sender-Verbindung" },
       "flame": { "name": "Flamme" },
       "gas": { "name": "Gas" }
     },

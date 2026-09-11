@@ -98,8 +98,8 @@ Verbindung wird der Hinweis automatisch entfernt.
 | Jetzt synchronisieren / Live-Modus starten | `button` | Verbindet sofort und aktualisiert alle Werte. Bei `0` wird danach regulär getrennt; bei `1`–`999` bleibt die Verbindung entsprechend lange bestehen |
 | Live-Modus beenden | `button` | Beendet einen zeitlich begrenzten Live-Modus, ohne einen bereits laufenden Befehl abzubrechen |
 | Flamme | `binary_sensor` | Brenner ist aktuell aktiv |
-| Truma-Bedienteil | `binary_sensor` | Besteht derzeit die direkte Bluetooth-Verbindung zum Bedienteil? |
-| Bluetooth-Gateway | `binary_sensor` | Ist der ESPHome-Proxy, über den dieses Bedienteil zuletzt erreicht wurde, in Home Assistant registriert? Bis zur ersten erkannten Route ist der Zustand unbekannt |
+| BLE-Truma-Verbindung | `binary_sensor` | Besteht derzeit die Verbindung zwischen Home Assistant und dem Truma-Bedienteil? Zustand: verbunden oder getrennt |
+| BLE-Sender-Verbindung | `binary_sensor` | Besteht die Verbindung zwischen Home Assistant und dem ESP32-Sender, über den dieses Bedienteil zuletzt erreicht wurde? Zustand: verbunden oder getrennt; bis zur ersten erkannten Route unbekannt |
 | Frischwasser | `sensor` | %, nur bei vorhandenem Tanksensor |
 | Grauwasser | `sensor` | %, nur bei vorhandenem Tanksensor |
 | Frischwasserpumpe | `switch` | Nur bei vorhandener Pumpe |
@@ -493,8 +493,8 @@ and clears the issue on the next successful connect.
 | Sync now / start live mode | `button` | Connect immediately, refresh all values and stay connected for the selected duration. `0` performs one refresh and disconnects normally |
 | End live mode | `button` | Ends a timed live session early without interrupting a command already being sent |
 | Flame | `binary_sensor` | Burner currently firing |
-| Truma panel | `binary_sensor` | Is the direct Bluetooth link to the panel currently connected? |
-| Bluetooth gateway | `binary_sensor` | Is the ESPHome proxy last used for this panel currently registered in Home Assistant? The state is unknown until the first route has been identified |
+| BLE Truma connection | `binary_sensor` | Is the connection between Home Assistant and the Truma panel currently connected? State: connected or disconnected |
+| BLE transmitter connection | `binary_sensor` | Is the connection between Home Assistant and the ESP32 transmitter last used for this panel available? State: connected or disconnected; unknown until the first route has been identified |
 | Fresh water | `sensor` | % — only where the vehicle has a tank sensor |
 | Grey water | `sensor` | % — only where the vehicle has a tank sensor |
 | Fresh water pump | `switch` | Only where the vehicle has one |
