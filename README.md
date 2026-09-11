@@ -104,7 +104,6 @@ Verbindung wird der Hinweis automatisch entfernt.
 | Warmwasser | `select` | Aus / Eco (40 °C) / Comfort (60 °C) / Hot (70 °C), soweit vom Bedienteil angeboten |
 | Energiequelle | `select` | Diesel / Elektro / Hybrid. Nur bei Dieselheizungen mit elektrischem Heizelement. Elektro und Hybrid starten aus Sicherheitsgründen immer mit 900 W |
 | Elektrische Heizleistung | `select` | 900 W / 1800 W. Nur in Elektro- und Hybridbetrieb aktiv |
-| Dieselbrenner (technisch) | `switch` | Diagnose-/Kompatibilitätsentität; die normale Bedienung erfolgt über Energiequelle |
 | Gas | `binary_sensor` | Zeigt, ob die Heizung Gas verwendet. Schreibgeschützt und nur bei Gasheizungen |
 | Lüfterstufe | `number` | 0–10 |
 | Live-Modus-Dauer | `number` | Ganze Minuten von 0 bis 999 |
@@ -511,7 +510,6 @@ and clears the issue on the next successful connect.
 | Water heating | `select` | Off / Eco (40 °C) / Comfort (60 °C) / Hot (70 °C) — the steps the panel offers |
 | Energy source | `select` | Diesel / Electric / Hybrid. Only on diesel heaters with an electric element. Electric and Hybrid always enter at the safer 900 W level |
 | Electric heating output | `select` | 900 W / 1800 W. Available only in Electric and Hybrid operation |
-| Diesel burner (technical) | `switch` | Diagnostic/backwards-compatibility entity; use Energy source for normal control |
 | Gas | `binary_sensor` | Whether the heater is drawing on gas. Read-only — the heater moves this itself. Only where it burns gas |
 | Fan level | `number` | 0–10 |
 | Live mode duration | `number` | Whole minutes from 0 through 999 |

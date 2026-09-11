@@ -81,7 +81,6 @@
       "water_temp": { "name": "Wassertemperatur" }
     },
     "switch": {
-      "diesel": { "name": "Dieselbrenner (technisch)" },
       "faster_water_heating": { "name": "Schnelles Wasseraufheizen" },
       "water_boost": { "name": "Warmwasser-Boost" },
       "water_pump": { "name": "Frischwasserpumpe" }

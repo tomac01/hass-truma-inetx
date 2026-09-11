@@ -285,15 +285,13 @@ def test_the_gas_sensor_appears_only_on_a_heater_that_burns_gas() -> None:
     assert made[-1].is_on is False
 
 
-def test_the_diesel_switch_waits_for_a_diesel_burner() -> None:
-    """The mirror image of #16: a gas Combi has no DieselLevel at all."""
+def test_diesel_is_controlled_only_by_the_energy_source_select() -> None:
     coordinator = _FakeCoordinator()
     made = _setup(SWITCH, coordinator)
     assert made == [], "a gas Combi was given a diesel burner switch"
 
     coordinator.report("EnergySrc", "DieselLevel", 1, HEATER)
-    assert _names(made) == ["TrumaDieselSwitch"], made
-    assert made[0].is_on is True
+    assert made == []
 
 
 def test_energy_source_appears_only_for_diesel_heater_with_electric_element() -> None:
@@ -356,11 +354,6 @@ def test_electric_power_is_only_available_for_electric_or_hybrid() -> None:
     coordinator.report("EnergySrc", "ElectricLevel", 1, HEATER)
     assert level.available is True
     assert level.current_option == "900 W"
-
-
-def test_legacy_diesel_switch_is_a_diagnostic_control() -> None:
-    diesel = SWITCH.TrumaDieselSwitch(_FakeCoordinator())
-    assert diesel._attr_entity_category is _EntityCategory.DIAGNOSTIC
 
 
 def test_the_batteries_appear_only_where_something_reports_them() -> None:

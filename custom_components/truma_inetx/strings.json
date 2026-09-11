@@ -121,9 +121,6 @@
       }
     },
     "switch": {
-      "diesel": {
-        "name": "Diesel burner (technical)"
-      },
       "faster_water_heating": {
         "name": "Faster water heating"
       },
