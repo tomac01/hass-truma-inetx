@@ -20,6 +20,12 @@ Es werden **keine zusätzlichen Lovelace- oder HACS-Karten** benötigt. Die Kart
 `custom:truma-climate-dial-card` gehört zur Integration und wird beim Start von
 Home Assistant automatisch registriert.
 
+Die beiden Status-Badges sind absichtlich getrennt: **Bluetooth-Gateway** zeigt,
+ob der für dieses Bedienteil erkannte ESPHome-Proxy in Home Assistant online
+ist. **Truma-Bedienteil** zeigt dagegen nur die aktuelle Verbindung zum
+Truma-Bedienteil. Bei einem Abfrageintervall größer 0 ist daher normalerweise
+der Proxy online, während die BLE-Verbindung zwischen zwei Abfragen aus ist.
+
 ## Entity-IDs anpassen
 
 Das Beispiel verwendet als Platzhalter den Gerätepräfix
@@ -93,6 +99,12 @@ thermostat card served automatically by this integration.
 
 No additional Lovelace or HACS cards are required. The integration registers
 `custom:truma-climate-dial-card` automatically when Home Assistant starts.
+
+The two status badges deliberately report different links. **Bluetooth gateway**
+shows whether the ESPHome proxy identified for this panel is online in Home
+Assistant. **Truma panel** only reports the current link to the Truma panel.
+With a non-zero poll interval, the proxy is therefore normally online while the
+panel link is off between polls.
 
 ## Replace the entity prefix
 

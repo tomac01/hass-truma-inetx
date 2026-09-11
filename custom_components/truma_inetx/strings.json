@@ -44,7 +44,10 @@
   "entity": {
     "binary_sensor": {
       "connection": {
-        "name": "BLE connection"
+        "name": "Truma panel"
+      },
+      "proxy_connection": {
+        "name": "Bluetooth gateway"
       },
       "flame": {
         "name": "Flame"

@@ -47,9 +47,11 @@ def _load_coordinator():
     _mod(
         "truma_live.bt",
         async_panel_advertising=lambda *a: False,
+        async_remote_scanner_source=lambda *a: None,
         async_resolve_proxy_device=None,
         async_wait_until_heard=None,
     )
+    _mod("truma_live.proxy", TrumaProxyTracker=object)
 
     def _real(name: str, package: str = "truma_live", path: Path = SRC):
         spec = importlib.util.spec_from_file_location(

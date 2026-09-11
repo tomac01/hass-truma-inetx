@@ -259,7 +259,11 @@ def test_gas_is_reflected_and_never_commanded() -> None:
 def test_the_gas_sensor_appears_only_on_a_heater_that_burns_gas() -> None:
     coordinator = _FakeCoordinator()
     made = _setup(BINARY, coordinator)
-    assert _names(made) == ["TrumaFlameSensor", "TrumaConnectionSensor"], made
+    assert _names(made) == [
+        "TrumaFlameSensor",
+        "TrumaConnectionSensor",
+        "TrumaProxySensor",
+    ], made
 
     coordinator.report("EnergySrc", "GasLevel", 1, HEATER)
     assert _names(made)[-1] == "TrumaGasSensor", made
@@ -267,7 +271,7 @@ def test_the_gas_sensor_appears_only_on_a_heater_that_burns_gas() -> None:
 
     # ...and only once, however many frames follow.
     coordinator.report("EnergySrc", "GasLevel", 0, HEATER)
-    assert len(made) == 3, made
+    assert len(made) == 4, made
     assert made[-1].is_on is False
 
 

@@ -22,6 +22,7 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from .ble import TrumaBleClient, device_from_bluez
 from .bt import (
     async_panel_advertising,
+    async_remote_scanner_source,
     async_resolve_proxy_device,
     async_wait_until_heard,
 )
@@ -31,6 +32,7 @@ from .const import (
     LOGGER,
     NO_PROXY_MISSES_BEFORE_WARNING,
 )
+from .proxy import TrumaProxyTracker
 from .truma.const import (
     CTRL_MBP,
     DEV_APP_DEFAULT,
@@ -172,6 +174,8 @@ class TrumaCoordinator(DataUpdateCoordinator[TrumaState]):
         # Consecutive resolves that found the panel advertising but no proxy
         # able to reach it. Debounces the repair issue (see _async_note_...).
         self._no_proxy_misses = 0
+        self._proxy_tracker = TrumaProxyTracker(self._async_proxy_changed)
+        entry.async_on_unload(self._proxy_tracker.async_setup())
         self._store: Store = Store(hass, _STORAGE_VERSION, f"{DOMAIN}_{entry.entry_id}")
         self._stop = False
         # Set on stop to interrupt the reconnect wait immediately (so unload is
@@ -194,6 +198,22 @@ class TrumaCoordinator(DataUpdateCoordinator[TrumaState]):
     async def _async_update_data(self) -> TrumaState:
         """Return the current shared state (updated by BLE notifications)."""
         return self._state
+
+    @property
+    def proxy_available(self) -> bool | None:
+        """Whether the ESPHome proxy used for this panel is registered."""
+        return self._proxy_tracker.available
+
+    @callback
+    def _async_proxy_changed(self) -> None:
+        """Publish a changed proxy registration state to entities."""
+        self.async_set_updated_data(self._state)
+
+    @callback
+    def _remember_proxy_for_address(self, address: str) -> None:
+        """Remember the remote scanner that supplied this panel route."""
+        if source := async_remote_scanner_source(self.hass, address):
+            self._proxy_tracker.remember_source(source)
 
     def _async_note_no_proxy_route(self) -> None:
         """Warn the user when the panel is audible but unreachable.
@@ -397,6 +417,7 @@ class TrumaCoordinator(DataUpdateCoordinator[TrumaState]):
                     self.unique_id,
                     initial.address,
                 )
+                self._remember_proxy_for_address(initial.address)
                 self._last_addr = None
                 await client.adopt(initial)
                 return await self._finish_startup(client)
@@ -447,6 +468,7 @@ class TrumaCoordinator(DataUpdateCoordinator[TrumaState]):
         # no equivalent -- it only happens straight after pairing, which itself
         # required a proxy route, so the issue cannot already be raised.)
         self._async_clear_no_proxy_route()
+        self._remember_proxy_for_address(ble_device.address)
         self._last_addr = ble_device.address
         # Dial while the panel is still audible: the resolved address is only
         # good for as long as the host's cache of it is (see
