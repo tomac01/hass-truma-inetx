@@ -71,4 +71,3 @@
 - [ ] Commit, push the feature branch, merge it into the fork's main branch, tag the release, and create GitHub release notes.
 - [ ] Back up the live integration files, install the fork release, restart Home Assistant, and verify the new entities and BLE behavior.
 - [ ] Add the three controls to the Vital dashboard using optimistic locking, then re-read and render the written dashboard.
-

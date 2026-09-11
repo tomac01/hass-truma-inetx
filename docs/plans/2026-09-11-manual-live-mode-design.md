@@ -49,4 +49,3 @@ Offline tests cover immediate wake, zero-minute refresh, timed hold, extension,
 early release, reconnect timing, range enforcement, and entity metadata. Live
 verification checks entity creation, a zero-minute refresh, a short timed hold,
 clean release, retained sensor availability, logs, and the rendered dashboard.
-
