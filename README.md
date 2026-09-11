@@ -26,6 +26,12 @@ nach Abschluss der Geräteabfrage gesendet.
 Antwortet die Heizung noch nicht, werden Energiequellen-Sollwerte höchstens
 dreimal gesendet und jeweils anhand frischer Rückmeldungen geprüft.
 
+Die erste Synchronisierung beginnt direkt nach dem Start, auch ohne vorhandene
+Messwerte. BLE-Teilpakete werden vollständig zusammengesetzt, bevor die Daten
+ausgewertet werden. Bestätigte Energiequellen-Wechsel erhalten einen zusätzlichen
+Eintrag „Von der Truma bestätigt“ in der Geräteaktivität. Technische Details und
+Regressionstests: [BLE-Transport](docs/ble-transport.md).
+
 Entwickelt wurde die Integration mit einem iNet X an einer **Truma Combi**.
 Andere Truma-Geräte sprechen dasselbe Protokoll, sind aber nicht getestet;
 Erfahrungsberichte sind willkommen.
@@ -425,6 +431,11 @@ confirmation raises an error; transport acknowledgement alone is not success.
 After reconnecting, commands wait until device discovery has completed.
 Energy-source setpoints are attempted at most three times while the heater
 wakes up, with fresh device feedback checked after each attempt.
+
+Initial synchronization starts immediately after startup, including when no
+measurements are available yet. BLE fragments are reassembled before decoding.
+Confirmed energy-source changes add a “Confirmed by Truma” device activity entry.
+Technical details and regression tests: [BLE transport](docs/ble-transport.md).
 
 [![HACS: custom](https://img.shields.io/badge/HACS-custom-41BDF5.svg)](https://hacs.xyz/docs/faq/custom_repositories)
 [![Validate](https://github.com/tomac01/hass-truma-inetx/actions/workflows/validate.yml/badge.svg)](https://github.com/tomac01/hass-truma-inetx/actions/workflows/validate.yml)

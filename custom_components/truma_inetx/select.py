@@ -205,3 +205,16 @@ class TrumaEnergySourceSelect(TrumaEntity, SelectEntity):
         else:
             raise ValueError(f"Unknown energy source: {option}")
         await self.coordinator.async_write_many(commands, confirm=True)
+        # Only after fresh device feedback confirmed the complete setting.
+        # Entities not yet attached to HA cannot create a device activity entry.
+        if (hass := getattr(self, "hass", None)) is not None:
+            german = hass.config.language.startswith("de")
+            label = {"diesel": "Diesel", "electric": "Elektro" if german else "Electric", "hybrid": "Hybrid"}[option]
+            message = (
+                f"Von der Truma bestätigt: Energiequelle {label}"
+                if german else f"Confirmed by Truma: energy source {label}"
+            )
+            hass.bus.async_fire("logbook_entry", {
+                "name": "Truma", "message": message,
+                "entity_id": self.entity_id, "domain": "select",
+            })

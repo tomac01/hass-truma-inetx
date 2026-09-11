@@ -10,9 +10,9 @@ Transport FSM (per ``send``):
   3. Write the packet to DATA_W (without response).
   4. Wait for a DataAck notification (0xF0) on CMD.
 
-Incoming DATA_R notifications are auto-ACKed (0xF001) and parsed into V3 frames
-dispatched to registered callbacks. A short (<=4 byte) MsgAck (0x83) is
-auto-confirmed with 0x0300.
+An incoming-message announcement (0x83 + uint16 length) is answered with
+0x0300. DATA_R fragments are accumulated to that length, acknowledged once
+with 0xF001, and then parsed into a complete V3 frame.
 """
 
 from __future__ import annotations
@@ -37,6 +37,7 @@ from .truma.const import (
     TRANSPORT_CONFIRM,
     TRANSPORT_MSG_ACK,
     TRANSPORT_INIT,
+    TRANSPORT_READY,
 )
 from .truma.protocol import parse_v3_frame
 
@@ -127,6 +128,9 @@ class TrumaBleClient:
         self._send_lock = asyncio.Lock()
         self._transport_event: asyncio.Event | None = None
         self._transport_ack: bytes | None = None
+        self._transport_expected: tuple[int, ...] = ()
+        self._receive_size: int | None = None
+        self._receive_buffer = bytearray()
         self.assigned_addr = DEV_APP_DEFAULT
 
     def on_data(self, callback: Callable[[dict], None]) -> None:
@@ -231,6 +235,8 @@ class TrumaBleClient:
 
     async def disconnect(self) -> None:
         """Disconnect the BLE link."""
+        self._receive_size = None
+        self._receive_buffer.clear()
         client = self._client
         self._client = None
         if client is not None:
@@ -248,21 +254,39 @@ class TrumaBleClient:
         self._handle_notification(CHAR_DATA_R, bytes(data))
 
     def _handle_notification(self, char_uuid: str, data: bytes) -> None:
-        if len(data) <= 4:
-            # MsgAck (0x83) must be auto-confirmed with 0x0300.
-            if data and data[0] == TRANSPORT_MSG_ACK:
+        _LOGGER.debug("Truma RX channel=%s bytes=%d header=%s", "CMD" if char_uuid == CHAR_CMD else "DATA", len(data), data[:7].hex())
+        if char_uuid == CHAR_CMD and len(data) <= 4:
+            _LOGGER.debug("Truma transport RX %s; waiting for %s", data.hex(), self._transport_expected)
+            # 0x83 announces an INCOMING message and its little-endian size.
+            # It is not an acknowledgement of our outgoing command.
+            if len(data) == 3 and data[0] == TRANSPORT_MSG_ACK:
+                self._receive_size = int.from_bytes(data[1:3], "little")
+                self._receive_buffer.clear()
                 self._fire_write(CHAR_CMD, bytes([TRANSPORT_CONFIRM, 0x00]))
-            self._transport_ack = data
-            if self._transport_event is not None:
+                return
+            if data and data[0] in self._transport_expected and self._transport_event is not None:
+                self._transport_ack = data
                 self._transport_event.set()
             return
 
         if char_uuid == CHAR_CMD:
-            if self._transport_event is not None:
-                self._transport_event.set()
             return
 
-        # DATA_R: incoming V3 data frame — auto-ACK, parse, dispatch.
+        # DATA_R is fragmented at the negotiated ATT payload size. Never
+        # parse or acknowledge the first fragment as though it were a frame.
+        if self._receive_size is not None:
+            self._receive_buffer.extend(data)
+            if len(self._receive_buffer) < self._receive_size:
+                return
+            if len(self._receive_buffer) != self._receive_size:
+                _LOGGER.warning("Truma incoming frame exceeded announced size")
+                self._receive_size = None
+                self._receive_buffer.clear()
+                return
+            data = bytes(self._receive_buffer)
+            self._receive_size = None
+            self._receive_buffer.clear()
+        # Acknowledge exactly once, after the entire incoming frame arrived.
         self._fire_write(CHAR_CMD, bytes([TRANSPORT_ACK, 0x01]))
         frame = parse_v3_frame(data)
         if frame is not None:
@@ -296,6 +320,7 @@ class TrumaBleClient:
         try:
             self._transport_event = asyncio.Event()
             self._transport_ack = None
+            self._transport_expected = (TRANSPORT_READY,)
 
             # 1. InitDataTransfer announce.
             announce = bytes(
@@ -308,7 +333,10 @@ class TrumaBleClient:
                 await asyncio.wait_for(self._transport_event.wait(), _READY_TIMEOUT)
             except TimeoutError:
                 _LOGGER.debug("Truma transport: timeout waiting for Ready")
+                return False
             self._transport_event.clear()
+            self._transport_ack = None
+            self._transport_expected = (TRANSPORT_ACK,)
 
             # 3. Send payload on DATA_W.
             await self._write(CHAR_DATA_W, packet)
@@ -316,12 +344,7 @@ class TrumaBleClient:
             # 4. Wait for DataAck.
             try:
                 await asyncio.wait_for(self._transport_event.wait(), _ACK_TIMEOUT)
-                # DataAck (0xF0) or MsgAck (0x83) both mean the panel took the
-                # frame — heater-routed writes reply MsgAck, panel writes DataAck.
-                if self._transport_ack and self._transport_ack[0] in (
-                    TRANSPORT_ACK,
-                    TRANSPORT_MSG_ACK,
-                ):
+                if self._transport_ack == bytes([TRANSPORT_ACK, 0x01]):
                     success = True
             except TimeoutError:
                 _LOGGER.debug("Truma transport: timeout waiting for DataAck")
@@ -333,4 +356,5 @@ class TrumaBleClient:
         finally:
             self._transport_event = None
             self._transport_ack = None
+            self._transport_expected = ()
         return success

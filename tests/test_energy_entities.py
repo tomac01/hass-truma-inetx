@@ -417,6 +417,33 @@ def test_the_flame_sensor_is_on_only_while_it_is_firing() -> None:
     assert flame.is_on is False, "2 is the appliance standing by, not a flame"
 
 
+def test_energy_confirmation_log_requires_confirmed_write() -> None:
+    coordinator = _FakeCoordinator()
+    entity = SELECT.TrumaEnergySourceSelect(coordinator)
+    events = []
+    entity.entity_id = "select.test_energy"
+    entity.hass = types.SimpleNamespace(
+        config=types.SimpleNamespace(language="de"),
+        bus=types.SimpleNamespace(async_fire=lambda name, data: events.append((name, data))),
+    )
+    asyncio.run(entity.async_select_option("hybrid"))
+    assert len(events) == 1, "confirmed setting is missing from activity log"
+    assert events[0][0] == "logbook_entry"
+    assert events[0][1]["entity_id"] == "select.test_energy"
+    assert "Hybrid" in events[0][1]["message"]
+    events.clear()
+    async def fail(*args, **kwargs):
+        raise RuntimeError("no panel confirmation")
+    coordinator.async_write_many = fail
+    try:
+        asyncio.run(entity.async_select_option("electric"))
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("unconfirmed setting must fail")
+    assert not events, "failed command was logged as confirmed"
+
+
 def _main() -> None:
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):
