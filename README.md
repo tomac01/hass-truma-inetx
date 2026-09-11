@@ -229,6 +229,11 @@ Erscheinungsbild des Frontends, hängt aber auch von nicht stabil garantierten
 internen Komponenten ab. Wenn Home Assistant sie umbenennt, zeigt die Karte
 eine ausdrückliche Fehlermeldung mit dem fehlenden Komponentennamen.
 
+Ein vollständiger, direkt einfügbarer Bedienbereich mit Live-Modus,
+Raumheizung, Warmwasser, Energiequellen und Temperaturen liegt unter
+[`examples/lovelace/`](examples/lovelace/). Die dortige Anleitung nennt alle
+Voraussetzungen und erklärt die Anpassung der gerätespezifischen Entity-IDs.
+
 ## Installation
 
 ### HACS als benutzerdefiniertes Repository
@@ -609,6 +614,11 @@ frontend's layout CSS, so it inherits upstream's appearance and behaviour.
 Those are internal frontend components with no stability guarantee: upstream
 restyling arrives for free, an upstream rename breaks the card (it then renders
 an explicit error naming the missing component).
+
+A complete copy-and-paste control area with live mode, space heating, hot
+water, energy sources and temperatures is available under
+[`examples/lovelace/`](examples/lovelace/). Its README lists the requirements
+and explains how to replace the device-specific entity IDs.
 
 ## Installation
 
