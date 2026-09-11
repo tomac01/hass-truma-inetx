@@ -14,6 +14,16 @@ Heizleistung und Lüfter – ohne Cloud, Truma-Konto oder LIN-Verkabelung.
 Dieser Fork ergänzt Entitäten für eine sofortige BLE-Aktualisierung und einen
 zeitlich begrenzten Live-Modus. Das Originalprojekt bleibt die Upstream-Basis.
 
+Nach jedem Steuerbefehl bleibt die BLE-Verbindung mindestens **60 Sekunden**
+offen. Jeder weitere Befehl verlängert diese Zeit erneut; eine längere
+Live-Modus-Dauer gilt zusätzlich. „Live-Modus beenden“ gibt die Verbindung
+ausdrücklich frei. Funkabbrüche können weiterhin eine Wiederverbindung erfordern.
+Beim Wechsel der Energiequelle wartet die Integration auf die Rückmeldung
+der Heizung. Elektro und Hybrid beginnen mit **900 W**. Bleibt die Bestätigung
+aus, wird ein Fehler angezeigt; eine Transportbestätigung allein zählt nicht
+als erfolgreiche Übernahme. Nach einer Wiederverbindung werden Befehle erst
+nach Abschluss der Geräteabfrage gesendet.
+
 Entwickelt wurde die Integration mit einem iNet X an einer **Truma Combi**.
 Andere Truma-Geräte sprechen dasselbe Protokoll, sind aber nicht getestet;
 Erfahrungsberichte sind willkommen.
@@ -404,6 +414,14 @@ gesponsert oder unterstützt.
 <a id="english-version"></a>
 
 # Truma iNet X (BLE) — Home Assistant integration
+
+After each control command, the BLE connection stays open for at least
+**60 seconds**. Each further command renews this period; a longer live-mode
+duration also applies. “End live mode” explicitly releases the connection.
+Radio disconnections may still require reconnection. Energy-source changes
+wait for heater feedback and enter Electric/Hybrid at **900 W**. Missing
+confirmation raises an error; transport acknowledgement alone is not success.
+After reconnecting, commands wait until device discovery has completed.
 
 [![HACS: custom](https://img.shields.io/badge/HACS-custom-41BDF5.svg)](https://hacs.xyz/docs/faq/custom_repositories)
 [![Validate](https://github.com/tomac01/hass-truma-inetx/actions/workflows/validate.yml/badge.svg)](https://github.com/tomac01/hass-truma-inetx/actions/workflows/validate.yml)

@@ -206,7 +206,8 @@ class _FakeCoordinator:
     async def async_write(self, topic: str, param: str, value: int) -> None:
         self.writes.append((topic, param, value))
 
-    async def async_write_many(self, commands) -> None:
+    async def async_write_many(self, commands, *, confirm=False) -> None:
+        assert confirm
         self.writes.extend(commands)
 
 

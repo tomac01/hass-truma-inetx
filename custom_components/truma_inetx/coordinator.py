@@ -94,6 +94,8 @@ _POLL_MAX_DWELL = 40  # seconds
 # A write in poll mode has to wait for a whole connect plus startup handshake
 # (~20 s measured), so allow generously more than that before giving up.
 _WRITE_CONNECT_TIMEOUT = 75  # seconds
+_COMMAND_HOLD_SECONDS = 60
+_WRITE_FEEDBACK_TIMEOUT = 12
 _MANUAL_LIVE_MINUTES_MAX = 999
 _STORAGE_VERSION = 1
 
@@ -185,11 +187,12 @@ class TrumaCoordinator(DataUpdateCoordinator[TrumaState]):
         # nudges the loop awake and holds the link open until it has been sent.
         self._wake_event = asyncio.Event()
         self._connected_event = asyncio.Event()
-        # Transport handshake complete: writes may run before the slower full
-        # parameter discovery. Kept separate from _connected_event, which is
-        # the promise made by manual refresh that all values are refreshed.
+        # Published only after registration, identity and device discovery.
         self._write_ready_event = asyncio.Event()
         self._writes_pending = 0
+        self._command_hold_until = 0.0
+        self._command_lock = asyncio.Lock()
+        self._write_feedback: dict[tuple[int, str, str], int] | None = None
         # Actual BLE session state. TrumaState.connected deliberately remains
         # true between polls so cached controls stay available; this flag is
         # what the user-facing BLE-Truma-Verbindung sensor reports instead.
@@ -388,7 +391,9 @@ class TrumaCoordinator(DataUpdateCoordinator[TrumaState]):
         while it is active; otherwise retain the integration's established
         poll and exponential-backoff behaviour.
         """
-        if self.manual_session_active:
+        if self.manual_session_active or self.hass.loop.time() < getattr(
+            self, "_command_hold_until", 0.0
+        ):
             return _RECONNECT_DELAY_BASE
         if connected and self.poll_interval:
             return self.poll_interval
@@ -644,6 +649,8 @@ class TrumaCoordinator(DataUpdateCoordinator[TrumaState]):
                     self._manual_hold_until = 0.0
                     break
                 now = self.hass.loop.time()
+                if now < getattr(self, "_command_hold_until", 0.0):
+                    continue
                 manual_active = (
                     bool(self.poll_interval)
                     and now < getattr(self, "_manual_hold_until", 0.0)
@@ -750,20 +757,6 @@ class TrumaCoordinator(DataUpdateCoordinator[TrumaState]):
             await client.send(frame)
             await asyncio.sleep(0.5)
 
-        # Commands requested while the integration was sleeping can now be
-        # addressed safely. Let the waiting write batch finish before the
-        # 13-second parameter discovery starts, which keeps a dashboard action
-        # responsive without weakening the full-refresh guarantee.
-        self._write_ready_event.set()
-        if self._writes_pending:
-            deadline = self.hass.loop.time() + 20
-            while (
-                self._writes_pending
-                and client.connected
-                and self.hass.loop.time() < deadline
-            ):
-                await asyncio.sleep(0.05)
-
         # 4. Request current values from every device on the bus.
         await self._discover_params(client)
 
@@ -772,6 +765,8 @@ class TrumaCoordinator(DataUpdateCoordinator[TrumaState]):
         # without this the first reading of every session is stale — and in
         # poll mode, where the link is not held, it would be the only reading.
         await self._request_measurements(client)
+        # A transport handshake alone does not mean the heater is ready.
+        self._write_ready_event.set()
 
     async def _discover_params(self, client: TrumaBleClient) -> None:
         """Ask each bus device for its current parameter values, one by one.
@@ -924,6 +919,8 @@ class TrumaCoordinator(DataUpdateCoordinator[TrumaState]):
                 self._learn_param(tn, pn, cbor, parsed.get("src"))
             if tn and pn and v is not None:
                 self._state.update(tn, pn, v, parsed.get("src"))
+                if getattr(self, "_write_feedback", None) is not None:
+                    self._write_feedback[(src, tn, pn)] = v
                 self.async_set_updated_data(self._state)
             return
 
@@ -941,6 +938,8 @@ class TrumaCoordinator(DataUpdateCoordinator[TrumaState]):
                         self._learn_param(tn, pn, param, parsed.get("src"))
                     if tn and pn and v is not None:
                         self._state.update(tn, pn, v, parsed.get("src"))
+                        if getattr(self, "_write_feedback", None) is not None:
+                            self._write_feedback[(src, tn, pn)] = v
             self.async_set_updated_data(self._state)
             return
 
@@ -1005,9 +1004,9 @@ class TrumaCoordinator(DataUpdateCoordinator[TrumaState]):
         return client
 
     async def async_write_many(
-        self, commands: list[tuple[str, str, int]]
+        self, commands: list[tuple[str, str, int]], *, confirm: bool = False
     ) -> None:
-        """Validate and send one atomic user action to the panel/heater.
+        """Serialize a user action and optionally require fresh device feedback.
 
         The panel confirms by pushing an updated value, which flows back through
         the normal notification path and updates the entity.
@@ -1022,19 +1021,49 @@ class TrumaCoordinator(DataUpdateCoordinator[TrumaState]):
         # would let it disconnect between getting the client and sending.
         self._writes_pending += 1
         try:
-            client = await self._client_for_write()
-
-            for topic, param, value in commands:
-                dest = self._state.get_command_dest(topic)
-                frame = build_write_frame(
-                    client.assigned_addr, dest, topic, param, value
-                )
-                LOGGER.debug(
-                    "Truma write %s.%s = %s -> 0x%04X", topic, param, value, dest
-                )
-                if not await client.send(frame):
-                    raise HomeAssistantError(
-                        f"Truma did not acknowledge write {topic}.{param}={value}"
+            async with self._command_lock:
+                client = await self._client_for_write()
+                self._manual_release_requested = False
+                self._write_feedback = {} if confirm else None
+                try:
+                    for topic, param, value in commands:
+                        dest = self._state.get_command_dest(topic)
+                        frame = build_write_frame(
+                            client.assigned_addr, dest, topic, param, value
+                        )
+                        LOGGER.debug(
+                            "Truma write %s.%s = %s -> 0x%04X", topic, param, value, dest
+                        )
+                        if not await client.send(frame):
+                            raise HomeAssistantError(
+                                f"Truma did not acknowledge write {topic}.{param}={value}"
+                            )
+                        if confirm:
+                            # Request fresh, device-scoped values. A transport
+                            # ACK confirms delivery, not the requested setting.
+                            await client.send(build_v3_frame(
+                                dest, client.assigned_addr, CTRL_MBP, MBP_PARAM_DISC, 0, b""
+                            ))
+                            deadline = self.hass.loop.time() + _WRITE_FEEDBACK_TIMEOUT
+                            while self._write_feedback.get((dest, topic, param)) != value:
+                                if not client.connected or self.hass.loop.time() >= deadline:
+                                    raise HomeAssistantError(
+                                        f"Truma did not confirm {topic}.{param}={value}; "
+                                        "check the panel and try again"
+                                    )
+                                await asyncio.sleep(0.1)
+                    if confirm:
+                        # Let delayed notifications settle before declaring the
+                        # complete multi-parameter setting successful.
+                        await asyncio.sleep(1)
+                        for topic, param, value in commands:
+                            dest = self._state.get_command_dest(topic)
+                            if self._write_feedback.get((dest, topic, param)) != value:
+                                raise HomeAssistantError("Truma did not retain the selected energy source")
+                finally:
+                    self._write_feedback = None
+                    self._command_hold_until = (
+                        self.hass.loop.time() + _COMMAND_HOLD_SECONDS
                     )
         finally:
             self._writes_pending -= 1

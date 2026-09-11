@@ -204,4 +204,4 @@ class TrumaEnergySourceSelect(TrumaEntity, SelectEntity):
             ]
         else:
             raise ValueError(f"Unknown energy source: {option}")
-        await self.coordinator.async_write_many(commands)
+        await self.coordinator.async_write_many(commands, confirm=True)
