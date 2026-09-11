@@ -62,13 +62,23 @@
         "state": {
           "diesel": "Diesel",
           "electric": "Elektro",
-          "hybrid": "Hybrid"
+          "hybrid": "Hybrid",
+          "changing": "Wird umgestellt …"
         }
       },
       "electric_level": { "name": "Elektrische Heizleistung" },
       "water_mode": { "name": "Warmwasser" }
     },
     "sensor": {
+      "operation": {
+        "name": "Vorgang",
+        "state": {
+          "idle": "Bereit",
+          "syncing": "Synchronisation läuft",
+          "changing": "Wird umgestellt …",
+          "error": "Fehler"
+        }
+      },
       "current_temp": { "name": "Raumtemperatur" },
       "faster_water_heating_time": { "name": "Schnellaufheizzeit" },
       "flame_status": { "name": "Flammenstatus" },

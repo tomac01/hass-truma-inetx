@@ -213,6 +213,8 @@ class _Coord:
         )
         self._state = STATE.TrumaState()
         self._last_frame = 0.0
+        self._data_revision = 0
+        self._manual_requests = {}
         self._stop = False
         self._writes_pending = 0
         self._connected_event = asyncio.Event()
@@ -226,6 +228,10 @@ class _Coord:
 
     async def _run_startup(self, _client) -> None:
         """Stand in for registration + discovery, which have their own file."""
+        self._on_frame({
+            "src": 0x0201, "control_raw": 0x03, "sub_type": 0x00,
+            "cbor": {"tn": "RoomClimate", "pn": "Mode", "v": 0},
+        })
 
     _request_measurements = COORD.TrumaCoordinator._request_measurements
     _finish_startup = COORD.TrumaCoordinator._finish_startup

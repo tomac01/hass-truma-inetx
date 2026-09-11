@@ -98,7 +98,7 @@ class _State:
     assigned_addr = None
 
 
-class _Coord:
+class _Coord(COORD.TrumaCoordinator):
     """Only the coordinator state touched by the manual-session interface."""
 
     poll_interval = 300
@@ -122,6 +122,12 @@ class _Coord:
         self._manual_hold_until = 0.0
         self._manual_release_requested = False
         self.manual_live_minutes = 0
+        self._state = _State()
+        self._operations = {}
+        self._operation_result = ("idle", None, None, None)
+        self._command_result_serial = 0
+        self._data_revision = 0
+        self._manual_requests = {}
 
     async_request_manual_session = COORD.TrumaCoordinator.async_request_manual_session
     async_end_manual_session = COORD.TrumaCoordinator.async_end_manual_session
@@ -138,6 +144,10 @@ class _Coord:
 
     async def _run_startup(self, _client) -> None:
         self.clock.now += 20
+        self._data_revision += 1
+
+    async def _discover_params(self, _client) -> None:
+        self._data_revision += 1
 
     def async_set_updated_data(self, _state) -> None:
         pass
@@ -338,6 +348,8 @@ def test_energy_write_rejects_transport_ack_without_fresh_device_feedback() -> N
         )
         class Client(_Client):
             async def send(self, frame):
+                if coord.clock.now == 140:
+                    coord._write_feedback[(0x0201, "AirHeating", "TgtTemp")] = 210
                 return True
         coord._client = Client()
         coord._write_ready_event.set()

@@ -129,6 +129,7 @@ class TrumaBleClient:
         self._transport_event: asyncio.Event | None = None
         self._transport_ack: bytes | None = None
         self._transport_expected: tuple[int, ...] = ()
+        self._transport_invalidated = False
         self._receive_size: int | None = None
         self._receive_buffer = bytearray()
         self.assigned_addr = DEV_APP_DEFAULT
@@ -140,7 +141,11 @@ class TrumaBleClient:
     @property
     def connected(self) -> bool:
         """Whether the BLE link is up."""
-        return self._client is not None and self._client.is_connected
+        return (
+            not self._transport_invalidated
+            and self._client is not None
+            and self._client.is_connected
+        )
 
     async def connect(
         self,
@@ -172,6 +177,7 @@ class TrumaBleClient:
             use_services_cache=True,
         )
         await self._subscribe()
+        self._transport_invalidated = False
     async def adopt(self, client: BleakClientWithServiceCache) -> None:
         """Take over an already-connected client (handed off from pairing).
 
@@ -183,6 +189,7 @@ class TrumaBleClient:
         self._loop = asyncio.get_running_loop()
         self._client = client
         await self._subscribe()
+        self._transport_invalidated = False
 
     async def _subscribe(self) -> None:
         """Establish encryption, then enable notifications.
@@ -316,6 +323,8 @@ class TrumaBleClient:
             return await self._send_locked(packet)
 
     async def _send_locked(self, packet: bytes) -> bool:
+        if self._transport_invalidated:
+            return False
         success = False
         try:
             self._transport_event = asyncio.Event()
@@ -351,10 +360,22 @@ class TrumaBleClient:
 
             # 5. Let any async MsgAck settle.
             await asyncio.sleep(0.2)
+        except asyncio.CancelledError:
+            success = False
+            raise
         except Exception as exc:  # noqa: BLE001
+            success = False
             _LOGGER.debug("Truma transport error: %s", exc)
         finally:
             self._transport_event = None
             self._transport_ack = None
             self._transport_expected = ()
+            if not success:
+                # Ready/ACK have no transfer identity. Any unsuccessful send
+                # (including a timeout or uncertain GATT write) leaves the
+                # stream ambiguous. Invalidate before releasing the send lock;
+                # a late response must never authorize the next packet.
+                self._transport_invalidated = True
+                self.assigned_addr = DEV_APP_DEFAULT
+                await self.disconnect()
         return success

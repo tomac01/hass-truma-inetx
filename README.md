@@ -32,6 +32,13 @@ ausgewertet werden. Bestätigte Energiequellen-Wechsel erhalten einen zusätzlic
 Eintrag „Von der Truma bestätigt“ in der Geräteaktivität. Technische Details und
 Regressionstests: [BLE-Transport](docs/ble-transport.md).
 
+Der Sensor **Vorgang** zeigt laufende Synchronisationen und Änderungen sowie
+Fehler an. Während eines Energiequellen-Wechsels erscheint **Wird umgestellt …**
+anstelle eines vorübergehenden Hybrid-Zustands. Die optionale Dashboard-Karte
+`custom:truma-operation-card` zeigt den Status und hebt die betroffene Steuerung
+dezent hervor. [Benutzeranleitung (Deutsch / English)](docs/user-guide.md) ·
+[Importierbare Dashboard-Karten](examples/lovelace/README.md).
+
 Entwickelt wurde die Integration mit einem iNet X an einer **Truma Combi**.
 Andere Truma-Geräte sprechen dasselbe Protokoll, sind aber nicht getestet;
 Erfahrungsberichte sind willkommen.
@@ -108,8 +115,8 @@ Verbindung wird der Hinweis automatisch entfernt.
 | Innentemperatur | `sensor` | °C |
 | Versorgungsspannung | `sensor` | V |
 | Warmwasser | `select` | Aus / Eco (40 °C) / Comfort (60 °C) / Hot (70 °C), soweit vom Bedienteil angeboten |
-| Energiequelle | `select` | Diesel / Elektro / Hybrid. Nur bei Dieselheizungen mit elektrischem Heizelement. Elektro und Hybrid starten aus Sicherheitsgründen immer mit 900 W |
-| Elektrische Heizleistung | `select` | 900 W / 1800 W. Nur in Elektro- und Hybridbetrieb aktiv |
+| Energiequelle | `select` | Bei Dieselheizungen mit elektrischem Heizelement: Diesel / Elektro / Hybrid. Bei nur einer erkannten Energiequelle deaktiviert. Elektro und Hybrid starten aus Sicherheitsgründen immer mit 900 W |
+| Elektrische Heizleistung | `select` | Bei nur einer erkannten Energiequelle deaktiviert. Bei Diesel/Elektro: 900 W / 1800 W, nur in Elektro- und Hybridbetrieb aktiv. Bei Gas/Elektro bleibt die separate Steuerung mit Aus / 900 W / 1800 W erhalten, soweit vom Panel angeboten |
 | Gas | `binary_sensor` | Zeigt, ob die Heizung Gas verwendet. Schreibgeschützt und nur bei Gasheizungen |
 | Lüfterstufe | `number` | 0–10 |
 | Live-Modus-Dauer | `number` | Ganze Minuten von 0 bis 999 |
@@ -118,6 +125,7 @@ Verbindung wird der Hinweis automatisch entfernt.
 | Flamme | `binary_sensor` | Brenner ist aktuell aktiv |
 | BLE-Truma-Verbindung | `binary_sensor` | Besteht derzeit die Verbindung zwischen Home Assistant und dem Truma-Bedienteil? Zustand: verbunden oder getrennt |
 | BLE-Sender-Verbindung | `binary_sensor` | Besteht die Verbindung zwischen Home Assistant und dem ESP32-Sender, über den dieses Bedienteil zuletzt erreicht wurde? Zustand: verbunden oder getrennt; bis zur ersten erkannten Route unbekannt |
+| Vorgang | `sensor` | Bereit / Synchronisation läuft / Wird umgestellt … / Fehler; unabhängig vom Brenner- und Verbindungszustand |
 | Frischwasser | `sensor` | %, nur bei vorhandenem Tanksensor |
 | Grauwasser | `sensor` | %, nur bei vorhandenem Tanksensor |
 | Frischwasserpumpe | `switch` | Nur bei vorhandener Pumpe |
@@ -437,6 +445,12 @@ measurements are available yet. BLE fragments are reassembled before decoding.
 Confirmed energy-source changes add a “Confirmed by Truma” device activity entry.
 Technical details and regression tests: [BLE transport](docs/ble-transport.md).
 
+The **Operation** sensor reports synchronization, changes and errors. During an
+energy-source transaction, **Changing …** replaces transient Hybrid states.
+The optional `custom:truma-operation-card` displays operation feedback around
+the affected control. [User guide (Deutsch / English)](docs/user-guide.md) ·
+[Importable dashboard cards](examples/lovelace/README.md).
+
 [![HACS: custom](https://img.shields.io/badge/HACS-custom-41BDF5.svg)](https://hacs.xyz/docs/faq/custom_repositories)
 [![Validate](https://github.com/tomac01/hass-truma-inetx/actions/workflows/validate.yml/badge.svg)](https://github.com/tomac01/hass-truma-inetx/actions/workflows/validate.yml)
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
@@ -519,8 +533,8 @@ and clears the issue on the next successful connect.
 | Internal temperature | `sensor` | °C |
 | Supply voltage | `sensor` | V |
 | Water heating | `select` | Off / Eco (40 °C) / Comfort (60 °C) / Hot (70 °C) — the steps the panel offers |
-| Energy source | `select` | Diesel / Electric / Hybrid. Only on diesel heaters with an electric element. Electric and Hybrid always enter at the safer 900 W level |
-| Electric heating output | `select` | 900 W / 1800 W. Available only in Electric and Hybrid operation |
+| Energy source | `select` | Diesel / Electric / Hybrid on diesel heaters with an electric element; disabled when only one energy source is detected. Electric and Hybrid always enter at the safer 900 W level |
+| Electric heating output | `select` | Disabled when only one energy source is detected. For Diesel/Electric: 900 W / 1800 W, available only in Electric and Hybrid operation. Gas/Electric retains standalone Off / 900 W / 1800 W control where offered by the panel |
 | Gas | `binary_sensor` | Whether the heater is drawing on gas. Read-only — the heater moves this itself. Only where it burns gas |
 | Fan level | `number` | 0–10 |
 | Live mode duration | `number` | Whole minutes from 0 through 999 |
@@ -529,6 +543,7 @@ and clears the issue on the next successful connect.
 | Flame | `binary_sensor` | Burner currently firing |
 | BLE Truma connection | `binary_sensor` | Is the connection between Home Assistant and the Truma panel currently connected? State: connected or disconnected |
 | BLE transmitter connection | `binary_sensor` | Is the connection between Home Assistant and the ESP32 transmitter last used for this panel available? State: connected or disconnected; unknown until the first route has been identified |
+| Operation | `sensor` | Ready / Synchronizing / Changing … / Error, independent of burner and connection status |
 | Fresh water | `sensor` | % — only where the vehicle has a tank sensor |
 | Grey water | `sensor` | % — only where the vehicle has a tank sensor |
 | Fresh water pump | `switch` | Only where the vehicle has one |

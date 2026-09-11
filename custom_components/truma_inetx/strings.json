@@ -78,7 +78,8 @@
         "state": {
           "diesel": "Diesel",
           "electric": "Electric",
-          "hybrid": "Hybrid"
+          "hybrid": "Hybrid",
+          "changing": "Changing …"
         }
       },
       "electric_level": {
@@ -89,6 +90,15 @@
       }
     },
     "sensor": {
+      "operation": {
+        "name": "Operation",
+        "state": {
+          "idle": "Ready",
+          "syncing": "Synchronizing",
+          "changing": "Changing …",
+          "error": "Error"
+        }
+      },
       "current_temp": {
         "name": "Room temperature"
       },

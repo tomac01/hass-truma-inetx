@@ -5,7 +5,7 @@
 `truma-controls.yaml` enthält den vollständigen Truma-Bedienbereich als eine
 einzige `vertical-stack`-Karte. Er verwendet ausschließlich native
 Home-Assistant-Karten und die Thermostatkarte, die von dieser Integration
-automatisch ausgeliefert wird.
+automatisch ausgeliefert wird, sowie deren Vorgangsfeedback-Karte.
 
 ## Voraussetzungen
 
@@ -18,7 +18,12 @@ automatisch ausgeliefert wird.
 
 Es werden **keine zusätzlichen Lovelace- oder HACS-Karten** benötigt. Die Karte
 `custom:truma-climate-dial-card` gehört zur Integration und wird beim Start von
-Home Assistant automatisch registriert.
+Home Assistant automatisch registriert. Dasselbe gilt für
+`custom:truma-operation-card`: Sie umschließt vorhandene Karten und zeigt
+laufende Vorgänge bzw. Fehler. Der zugehörige Sensor **Vorgang** muss unter
+`operation_entity` mit seiner tatsächlichen Entity-ID eingetragen werden.
+Bei reduzierter Bewegung bleibt die Hervorhebung statisch.
+[Benutzeranleitung](../../docs/user-guide.md).
 
 Die beiden Status-Badges sind absichtlich getrennt: **BLE-Sender-Verbindung** zeigt,
 ob der für dieses Bedienteil erkannte ESPHome-Proxy in Home Assistant online
@@ -54,8 +59,9 @@ Die Karte verwendet **Energiequelle** als zentrale Auswahl. Beim Wechsel auf
 Elektro oder Hybrid aktiviert die Integration den Heizstab zunächst mit
 900 W; anschließend kann **Elektrische Heizleistung** auf 1800 W gestellt
 werden. Bei Diesel ist diese Leistungswahl automatisch deaktiviert. Der alte
-Dieselbrenner-Schalter bleibt nur als technische Diagnoseentität erhalten und
-gehört nicht in die normale Bedienkarte.
+Dieselbrenner-Schalter wurde durch die gemeinsame Energiequellen-Auswahl ersetzt.
+Bei nur einer erkannten Energiequelle sind beide Felder deaktiviert; es gibt
+keine zusätzliche Aus/Diesel-Auswahl.
 
 ## In ein Storage-Dashboard importieren
 
@@ -71,10 +77,13 @@ werden. Ihre inneren Elemente ordnen sich responsiv an.
 
 ## Optionale Hardware
 
-Nicht jedes Fahrzeug meldet alle Entitäten. Wenn beispielsweise keine
-elektrische Heizung oder kein Dieselbrenner vorhanden ist, die betreffende
-Tile-Karte aus dem YAML entfernen. Die Integration erzeugt optionale Entitäten
-erst, nachdem die Hardware den jeweiligen Parameter gemeldet hat.
+Nicht jedes Fahrzeug meldet alle Entitäten. Fehlt eine Entität, ihren gesamten
+`custom:truma-operation-card`-Block einschließlich der enthaltenen Tile-Karte
+entfernen, nicht nur die innere Karte. Ein vorhandenes, aber wegen nur einer
+Energiequelle deaktiviertes Feld bleibt dagegen stehen. Bei Gas/Elektro die
+elektrische Leistungswahl beibehalten: sie bietet separat Aus / 900 W / 1800 W
+an, soweit vom Panel unterstützt. Die Integration erzeugt optionale Entitäten erst,
+nachdem die Hardware den jeweiligen Parameter gemeldet hat.
 
 ## Live-Modus
 
@@ -93,7 +102,7 @@ bedeutet weiterhin dauerhaft verbunden bleiben.
 
 `truma-controls.yaml` contains the complete Truma control area as one
 `vertical-stack` card. It only uses built-in Home Assistant cards and the
-thermostat card served automatically by this integration.
+thermostat and operation-feedback cards served automatically by this integration.
 
 ## Requirements
 
@@ -105,7 +114,11 @@ thermostat card served automatically by this integration.
 - an active ESPHome Bluetooth proxy within range is recommended
 
 No additional Lovelace or HACS cards are required. The integration registers
-`custom:truma-climate-dial-card` automatically when Home Assistant starts.
+`custom:truma-climate-dial-card` and `custom:truma-operation-card` automatically
+when Home Assistant starts. Set `operation_entity` to your actual **Operation**
+sensor ID. The feedback wrapper highlights the matching running operation,
+shows errors, and respects reduced-motion preferences.
+[User guide](../../docs/user-guide.md#english).
 
 The two status badges deliberately report different links. **BLE transmitter connection**
 shows whether the ESPHome proxy identified for this panel is online in Home
@@ -133,11 +146,17 @@ The button cards contain the prefix twice, in `entity` and
 4. Replace the example entity prefix.
 5. Check the preview and save.
 
-Remove cards for optional entities that the installed heater does not expose.
+Remove the entire `custom:truma-operation-card` wrapper, including its inner
+tile, for optional entities the heater does not expose. Keep fields that exist
+but are disabled because only one energy source is detected. Gas/Electric
+heaters retain standalone Off / 900 W / 1800 W electric-output control,
+as supported by the panel.
 The **Energy source** select coordinates Diesel / Electric / Hybrid. Electric
 and Hybrid always start at 900 W; the **Electric heating output** select then
 offers 900 W or 1800 W and is disabled again in Diesel mode. The legacy diesel
-switch remains only as a technical diagnostic entity.
+switch has been replaced by the combined energy-source select.
+When only one energy source is detected, both fields are disabled; no additional
+Off/Diesel selector is offered.
 
 ## Live mode
 

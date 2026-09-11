@@ -100,6 +100,10 @@ def _load():
         def __init__(self, coordinator=None) -> None:
             self.coordinator = coordinator
 
+        @property
+        def available(self):
+            return True
+
     _mod("homeassistant.helpers.update_coordinator",
          DataUpdateCoordinator=_Coordinator, CoordinatorEntity=_Coordinator)
     _mod("homeassistant.components", __path__=[])
@@ -219,9 +223,13 @@ def test_a_step_the_vehicle_does_not_have_is_not_offered() -> None:
             {"n": "1800 W", "a": False, "v": 2},
         ],
     })
-
-    options = SELECT.TrumaElectricLevelSelect.options.fget(_Holder(state))
-    assert options == ["900 W"], options
+    state.update("EnergySrc", "GasLevel", 0)
+    state.update("EnergySrc", "ElectricLevel", 1)
+    entity = SELECT.TrumaElectricLevelSelect(_FakeCoordinator(state))
+    assert entity.options == ["off", "900 W"], entity.options
+    state.update("EnergySrc", "DieselLevel", 1)
+    state.update("EnergySrc", "ElectricLevel", 0)
+    assert entity.options == ["900 W"]
 
 
 def test_a_silent_panel_uses_the_safe_fallback_steps() -> None:
@@ -229,8 +237,10 @@ def test_a_silent_panel_uses_the_safe_fallback_steps() -> None:
     assert SELECT.TrumaWaterModeSelect.options.fget(_Holder(state)) == [
         "off", "Eco (40 °C)", "Comfort (60 °C)", "Hot (70 °C)",
     ]
-    assert SELECT.TrumaElectricLevelSelect.options.fget(_Holder(state)) == [
-        "900 W", "1800 W",
+    state.update("EnergySrc", "GasLevel", 0)
+    state.update("EnergySrc", "ElectricLevel", 0)
+    assert SELECT.TrumaElectricLevelSelect(_FakeCoordinator(state)).options == [
+        "off", "900 W", "1800 W",
     ]
 
 
@@ -307,28 +317,26 @@ def _setup_selects(coordinator) -> list:
     return made
 
 
-def test_the_electric_select_waits_for_an_electric_element() -> None:
-    """Measured on a Combi D van: the panel never mentions ElectricLevel.
-
-    That select was offering off / 900 W / 1800 W against hardware that has
-    none of them, which reads as a broken integration rather than as absent
-    hardware -- the same reasoning the water entities already follow.
-    """
+def test_energy_fields_appear_once_on_any_source_and_single_source_is_disabled() -> None:
+    """Both fields remain visible but disabled for single-source hardware."""
     coordinator = _FakeCoordinator(STATE.TrumaState())
     made = _setup_selects(coordinator)
 
     assert [type(entity).__name__ for entity in made] == ["TrumaWaterModeSelect"], made
 
-    # A heater that has the element says so, and then it appears.
+    # One reported source creates both fields, without enabling either.
     coordinator.report("EnergySrc", "ElectricLevel", 0)
     assert [type(entity).__name__ for entity in made] == [
         "TrumaWaterModeSelect",
+        "TrumaEnergySourceSelect",
         "TrumaElectricLevelSelect",
     ], made
+    assert not made[1].available and not made[2].available
+    assert made[1].options == [] and made[2].options == []
 
     # ...and only once, however many frames follow.
     coordinator.report("EnergySrc", "ElectricLevel", 1)
-    assert len(made) == 2, made
+    assert len(made) == 3, made
 
 
 def test_water_heating_is_not_gated_on_anything() -> None:

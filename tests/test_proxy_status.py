@@ -144,9 +144,9 @@ def test_remote_scanner_source_identifies_only_the_proxy_route() -> None:
     address = "62:4A:BD:AD:73:5D"
     SCANNERS[address] = [
         _ScannerDevice(_LocalScanner("hci0")),
-        _ScannerDevice(_RemoteScanner("A0:A3:B3:90:C5:3E")),
+        _ScannerDevice(_RemoteScanner("AA:BB:CC:DD:EE:02")),
     ]
-    assert BT.async_remote_scanner_source(None, address) == "A0:A3:B3:90:C5:3E"
+    assert BT.async_remote_scanner_source(None, address) == "AA:BB:CC:DD:EE:02"
 
     SCANNERS[address] = [_ScannerDevice(_LocalScanner("hci0"))]
     assert BT.async_remote_scanner_source(None, address) is None
@@ -196,7 +196,7 @@ def test_tracker_follows_the_specific_proxy_registration() -> None:
     tracker.async_setup()
     assert tracker.available is None
 
-    source = "A0:A3:B3:90:C5:3E"
+    source = "AA:BB:CC:DD:EE:02"
     tracker.remember_source(source)
     assert tracker.source == source
     assert tracker.available is False

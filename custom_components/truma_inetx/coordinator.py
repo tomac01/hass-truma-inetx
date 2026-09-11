@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from contextlib import contextmanager
 
 from bleak_retry_connector import BleakClientWithServiceCache
 from homeassistant.config_entries import ConfigEntry
@@ -205,6 +206,114 @@ class TrumaCoordinator(DataUpdateCoordinator[TrumaState]):
         self._manual_hold_until = 0.0
         self._manual_release_requested = False
         self.manual_live_minutes = 0
+        self._operations: dict[int, tuple[str, str, object]] = {}
+        self._operation_serial = 0
+        self._operation_result_serial = 0
+        self._command_result_serial = 0
+        self._operation_result = ("idle", None, None, None)
+        self._data_revision = 0
+        self._manual_requests: dict[int, asyncio.Event] = {}
+
+    @property
+    def operation_state(self) -> str:
+        """Report commands and their errors ahead of background sync."""
+        return self._foreground_operation()[0]
+
+    @property
+    def operation_attributes(self) -> dict:
+        """Stable frontend action, target and error contract."""
+        _, action, target, error = self._foreground_operation()
+        return {"action": action, "target": target, "error": error}
+
+    def _foreground_operation(self) -> tuple:
+        for op in self._operations.values():
+            if op[0] == "changing":
+                return (*op, None)
+        if (
+            self._operation_result[0] == "error"
+            and self._operation_result[1] != "sync"
+        ):
+            return self._operation_result
+        if self._operations:
+            return (*next(iter(self._operations.values())), None)
+        return self._operation_result
+
+    @property
+    def energy_source_changing(self) -> bool:
+        """Include queued source transactions, even behind another command."""
+        return any(op[1] == "energy_source" for op in self._operations.values())
+
+    def _begin_operation(self, action: str, target=None) -> int:
+        self._operation_serial = getattr(self, "_operation_serial", 0) + 1
+        token = self._operation_serial
+        self._operations[token] = (
+            "syncing" if action == "sync" else "changing", action, target
+        )
+        self.async_set_updated_data(self._state)
+        return token
+
+    def _end_operation(self, token: int, error: str | None = None) -> None:
+        op = self._operations.pop(token, None)
+        if op is None:
+            return
+        # A reconnect can begin after the command that woke it. Completing
+        # that background read must not erase the failed user command.
+        preserves_command_error = (
+            op[1] == "sync"
+            and self._operation_result[0] == "error"
+            and self._operation_result[1] != "sync"
+        )
+        if op[0] == "changing":
+            # Sync may have a newer token than the command that woke it.
+            # Only another command result can supersede this command result.
+            publish = token >= self._command_result_serial
+            if publish:
+                self._command_result_serial = token
+        else:
+            publish = (
+                token >= getattr(self, "_operation_result_serial", 0)
+                and not preserves_command_error
+            )
+        if publish:
+            self._operation_result_serial = max(
+                token, getattr(self, "_operation_result_serial", 0)
+            )
+            self._operation_result = (
+                ("error", op[1], op[2], error)
+                if error else ("idle", None, None, None)
+            )
+        self.async_set_updated_data(self._state)
+
+    @contextmanager
+    def _operation(self, action: str, target=None):
+        """Own precisely one lifecycle; cancellation must also terminate it."""
+        token = self._begin_operation(action, target)
+        try:
+            yield token
+        except asyncio.CancelledError:
+            self._end_operation(token, "Operation cancelled")
+            raise
+        except Exception as exc:
+            self._end_operation(token, str(exc) or type(exc).__name__)
+            raise
+        else:
+            self._end_operation(token)
+
+    @staticmethod
+    def _command_operation(commands: list[tuple[str, str, int]]) -> tuple:
+        topic, param, value = commands[-1]
+        action = {
+            ("RoomClimate", "Mode"): "hvac_mode",
+            ("AirHeating", "TgtTemp"): "temperature",
+            ("AirCirculation", "FanLevel"): "fan_level",
+            ("EnergySrc", "ElectricLevel"): "electric_heating",
+            ("WaterHeating", "Active"): "water_mode",
+            ("WaterHeating", "Mode"): "water_mode",
+            ("WaterHeating", "FasterHeatingMode"): "water_priority",
+        }.get((topic, param), f"{topic}.{param}")
+        if action == "hvac_mode":
+            value = {0: "off", 1: "auto", 2: "cool", 3: "heat", 4: "heat", 5: "fan_only", 6: "dry"}.get(value, value)
+        return action, value
 
     async def _async_update_data(self) -> TrumaState:
         """Return the current shared state (updated by BLE notifications)."""
@@ -336,9 +445,14 @@ class TrumaCoordinator(DataUpdateCoordinator[TrumaState]):
             # pending until startup succeeds, but a failed dial must still
             # respect reconnect backoff instead of spinning without delay.
             self._manual_wake_pending = False
+            self._sync_operation = self._begin_operation("sync")
             try:
                 connected = await self._connect_and_run()
+            except asyncio.CancelledError:
+                self._end_operation(self._sync_operation, "Synchronization cancelled")
+                raise
             except Exception as exc:  # noqa: BLE001
+                self._end_operation(self._sync_operation, str(exc) or type(exc).__name__)
                 LOGGER.debug("Truma session ended: %s", exc)
                 # If the attempt never got a link up, demote that address so
                 # the resolver rotates to another advertised RPA next round
@@ -351,6 +465,7 @@ class TrumaCoordinator(DataUpdateCoordinator[TrumaState]):
                 if self._last_addr:
                     self._avoid.add(self._last_addr)
             finally:
+                self._end_operation(self._sync_operation)
                 # Always tear the client down before the next attempt so a
                 # half-open link never lingers holding the proxy's connection
                 # slot (the ghost that otherwise needs a manual power-cycle).
@@ -553,6 +668,29 @@ class TrumaCoordinator(DataUpdateCoordinator[TrumaState]):
                 f"{_MANUAL_LIVE_MINUTES_MAX} minutes"
             )
 
+        with self._operation("sync") as token:
+            self._manual_operation = token
+            cancelled = asyncio.Event()
+            self._manual_requests[token] = cancelled
+            try:
+                await self._request_manual_session(minutes, cancelled)
+                if cancelled.is_set():
+                    raise HomeAssistantError("Manual refresh cancelled")
+            except (Exception, asyncio.CancelledError):
+                # A connected refresh establishes its hold before discovery.
+                # Failure must release it, but cannot undo a newer request.
+                if self._manual_operation == token:
+                    self._manual_hold_until = 0.0
+                raise
+            finally:
+                self._manual_requests.pop(token, None)
+                if self._manual_operation == token:
+                    self._manual_hold_request_minutes = None
+                    self._manual_wake_pending = False
+
+    async def _request_manual_session(self, minutes: int, cancelled: asyncio.Event) -> None:
+        """Perform the requested refresh under its operation owner."""
+
         client = self._client
         if (
             client is not None
@@ -567,7 +705,11 @@ class TrumaCoordinator(DataUpdateCoordinator[TrumaState]):
             )
             # Startup has just refreshed the ordinary parameters.  Ask the
             # on-demand sensors too when the link was already available.
+            revision = self._data_revision
+            await self._discover_params(client)
             await self._request_measurements(client)
+            if self._data_revision == revision:
+                raise HomeAssistantError("Truma refresh received no fresh panel parameters")
             return
 
         self._manual_hold_request_minutes = minutes
@@ -580,16 +722,23 @@ class TrumaCoordinator(DataUpdateCoordinator[TrumaState]):
             self.unique_id,
             minutes,
         )
+        connected = asyncio.create_task(self._connected_event.wait())
+        stopped = asyncio.create_task(cancelled.wait())
         try:
-            await asyncio.wait_for(
-                self._connected_event.wait(), timeout=_WRITE_CONNECT_TIMEOUT
+            done, _ = await asyncio.wait(
+                {connected, stopped}, timeout=_WRITE_CONNECT_TIMEOUT,
+                return_when=asyncio.FIRST_COMPLETED,
             )
-        except TimeoutError:
-            self._manual_hold_request_minutes = None
-            self._manual_wake_pending = False
-            raise HomeAssistantError(
-                "Truma panel did not answer in time for the manual refresh"
-            ) from None
+            if stopped in done:
+                raise HomeAssistantError("Manual refresh cancelled")
+            if connected not in done:
+                raise HomeAssistantError(
+                    "Truma panel did not answer in time for the manual refresh"
+                )
+        finally:
+            connected.cancel()
+            stopped.cancel()
+            await asyncio.gather(connected, stopped, return_exceptions=True)
 
     async def async_end_manual_session(self) -> None:
         """Release a manual hold without interrupting an in-flight write."""
@@ -597,6 +746,10 @@ class TrumaCoordinator(DataUpdateCoordinator[TrumaState]):
         self._manual_wake_pending = False
         self._manual_hold_until = 0.0
         self._manual_release_requested = True
+        for cancelled in self._manual_requests.values():
+            cancelled.set()
+        if not self._writes_pending:
+            self._wake_event.clear()
         # The poll dwell loop checks this once a second, after checking writes,
         # and therefore never disconnects underneath an in-flight command.
         LOGGER.debug("Truma %s: manual live mode released", self.unique_id)
@@ -607,7 +760,11 @@ class TrumaCoordinator(DataUpdateCoordinator[TrumaState]):
         Shared by the fresh-connect and adopted-handoff paths. Returns ``True``
         (the connection is up, so the caller resets the backoff).
         """
+        revision = self._data_revision
         await self._run_startup(client)
+        if self._data_revision == revision:
+            raise HomeAssistantError("Truma synchronization received no fresh panel parameters")
+        self._write_ready_event.set()
 
         if getattr(self, "_manual_hold_request_minutes", None) is not None:
             minutes = self._manual_hold_request_minutes
@@ -629,6 +786,8 @@ class TrumaCoordinator(DataUpdateCoordinator[TrumaState]):
         self.async_set_updated_data(self._state)
         LOGGER.info("Truma %s connected and subscribed", self.unique_id)
         self._connected_event.set()
+        if (token := getattr(self, "_sync_operation", None)) is not None:
+            self._end_operation(token)
 
         # Startup just delivered frames, so seed the watchdog from now.
         self._last_frame = self.hass.loop.time()
@@ -640,8 +799,8 @@ class TrumaCoordinator(DataUpdateCoordinator[TrumaState]):
             next_measure = self.hass.loop.time() + _MEASURE_INTERVAL
             while not self._stop and client.connected:
                 await asyncio.sleep(1)
-                if self._writes_pending:
-                    # Someone is mid-write; do not hang up under them.
+                if self._writes_pending or self._manual_requests:
+                    # A command or manual read owns the session until done.
                     started = self.hass.loop.time()
                     continue
                 if getattr(self, "_manual_release_requested", False):
@@ -765,8 +924,7 @@ class TrumaCoordinator(DataUpdateCoordinator[TrumaState]):
         # without this the first reading of every session is stale — and in
         # poll mode, where the link is not held, it would be the only reading.
         await self._request_measurements(client)
-        # A transport handshake alone does not mean the heater is ready.
-        self._write_ready_event.set()
+        # _finish_startup publishes readiness only with fresh panel data.
 
     async def _discover_params(self, client: TrumaBleClient) -> None:
         """Ask each bus device for its current parameter values, one by one.
@@ -919,6 +1077,8 @@ class TrumaCoordinator(DataUpdateCoordinator[TrumaState]):
                 self._learn_param(tn, pn, cbor, parsed.get("src"))
             if tn and pn and v is not None:
                 self._state.update(tn, pn, v, parsed.get("src"))
+                if isinstance(src, int) and src not in (DEV_BROADCAST, DEV_MSG_BROKER, self._state.assigned_addr):
+                    self._data_revision = getattr(self, "_data_revision", 0) + 1
                 if getattr(self, "_write_feedback", None) is not None:
                     self._write_feedback[(src, tn, pn)] = v
                 self.async_set_updated_data(self._state)
@@ -938,6 +1098,8 @@ class TrumaCoordinator(DataUpdateCoordinator[TrumaState]):
                         self._learn_param(tn, pn, param, parsed.get("src"))
                     if tn and pn and v is not None:
                         self._state.update(tn, pn, v, parsed.get("src"))
+                        if isinstance(src, int) and src not in (DEV_BROADCAST, DEV_MSG_BROKER, self._state.assigned_addr):
+                            self._data_revision = getattr(self, "_data_revision", 0) + 1
                         if getattr(self, "_write_feedback", None) is not None:
                             self._write_feedback[(src, tn, pn)] = v
             self.async_set_updated_data(self._state)
@@ -1004,13 +1166,26 @@ class TrumaCoordinator(DataUpdateCoordinator[TrumaState]):
         return client
 
     async def async_write_many(
-        self, commands: list[tuple[str, str, int]], *, confirm: bool = False
+        self, commands: list[tuple[str, str, int]], *, confirm: bool = True,
+        action: str | None = None, target=None,
     ) -> None:
-        """Serialize a user action and optionally require fresh device feedback.
+        """Serialize a user action and require fresh device feedback.
 
         The panel confirms by pushing an updated value, which flows back through
         the normal notification path and updates the entity.
         """
+        if not commands:
+            return
+        inferred_action, inferred_target = self._command_operation(commands)
+        with self._operation(action or inferred_action, target if action else inferred_target):
+            # Retain the keyword for existing callers, but transport ACK alone
+            # can never complete a user operation successfully.
+            await self._write_many(commands)
+
+    async def _write_many(
+        self, commands: list[tuple[str, str, int]]
+    ) -> None:
+        """Serialize writes while the public operation includes queue time."""
         for topic, param, value in commands:
             ok, msg = self._state.validate_write(topic, param, value)
             if not ok:
@@ -1024,7 +1199,7 @@ class TrumaCoordinator(DataUpdateCoordinator[TrumaState]):
             async with self._command_lock:
                 client = await self._client_for_write()
                 self._manual_release_requested = False
-                self._write_feedback = {} if confirm else None
+                self._write_feedback = {}
                 try:
                     for topic, param, value in commands:
                         dest = self._state.get_command_dest(topic)
@@ -1034,18 +1209,11 @@ class TrumaCoordinator(DataUpdateCoordinator[TrumaState]):
                         LOGGER.debug(
                             "Truma write %s.%s = %s -> 0x%04X", topic, param, value, dest
                         )
-                        for attempt in range(3 if confirm else 1):
-                            if confirm:
-                                self._write_feedback.pop((dest, topic, param), None)
-                            acknowledged = await client.send(frame)
-                            if not confirm:
-                                if not acknowledged:
-                                    raise HomeAssistantError(
-                                        f"Truma did not acknowledge write {topic}.{param}={value}"
-                                    )
-                                break
+                        for attempt in range(3):
+                            self._write_feedback.pop((dest, topic, param), None)
+                            await client.send(frame)
                             # Heater wake-up can outlast panel registration.
-                            # Only retry idempotent source setpoints, and only
+                            # Retry these absolute parameter setpoints only
                             # after checking fresh feedback for the same value.
                             await client.send(build_v3_frame(
                                 dest, client.assigned_addr, CTRL_MBP, MBP_PARAM_DISC, 0, b""
@@ -1066,14 +1234,14 @@ class TrumaCoordinator(DataUpdateCoordinator[TrumaState]):
                                 )
                             LOGGER.debug("Truma retry %s.%s=%s after missing feedback", topic, param, value)
                             await asyncio.sleep(2)
-                    if confirm:
+                    if len(commands) > 1:
                         # Let delayed notifications settle before declaring the
                         # complete multi-parameter setting successful.
                         await asyncio.sleep(1)
-                        for topic, param, value in commands:
-                            dest = self._state.get_command_dest(topic)
-                            if self._write_feedback.get((dest, topic, param)) != value:
-                                raise HomeAssistantError("Truma did not retain the selected energy source")
+                    for topic, param, value in commands:
+                        dest = self._state.get_command_dest(topic)
+                        if self._write_feedback.get((dest, topic, param)) != value:
+                            raise HomeAssistantError("Truma did not retain the requested setting")
                 finally:
                     self._write_feedback = None
                     self._command_hold_until = (
@@ -1084,4 +1252,4 @@ class TrumaCoordinator(DataUpdateCoordinator[TrumaState]):
 
     async def async_write(self, topic: str, param: str, value: int) -> None:
         """Send one parameter write as an atomic user action."""
-        await self.async_write_many([(topic, param, value)])
+        await self.async_write_many([(topic, param, value)], confirm=True)

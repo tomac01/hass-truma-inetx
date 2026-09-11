@@ -20,6 +20,9 @@ cards:
         show_name: false
         show_state: true
 
+  - type: custom:truma-operation-card
+    operation_entity: sensor.truma_inetx_ffb4d1_vorgang
+
   - type: tile
     entity: number.truma_inetx_ffb4d1_live_modus_dauer
     name: Live-Modus · Minuten
@@ -36,18 +39,22 @@ cards:
     columns: 2
     square: false
     cards:
-      - type: button
-        entity: button.truma_inetx_ffb4d1_jetzt_synchronisieren_live_modus_starten
-        name: Jetzt synchronisieren
-        icon: mdi:bluetooth-connect
-        show_state: false
-        tap_action:
-          action: perform-action
-          perform_action: button.press
-          target:
-            entity_id: button.truma_inetx_ffb4d1_jetzt_synchronisieren_live_modus_starten
-        hold_action:
-          action: none
+      - type: custom:truma-operation-card
+        operation_entity: sensor.truma_inetx_ffb4d1_vorgang
+        action: sync
+        card:
+          type: button
+          entity: button.truma_inetx_ffb4d1_jetzt_synchronisieren_live_modus_starten
+          name: Jetzt synchronisieren
+          icon: mdi:bluetooth-connect
+          show_state: false
+          tap_action:
+            action: perform-action
+            perform_action: button.press
+            target:
+              entity_id: button.truma_inetx_ffb4d1_jetzt_synchronisieren_live_modus_starten
+          hold_action:
+            action: none
 
       - type: button
         entity: button.truma_inetx_ffb4d1_live_modus_beenden
@@ -68,9 +75,13 @@ cards:
       **Heizlogik:** Energiequelle wählen → Betriebsart in der Raumheizung
       wählen → Solltemperatur einstellen.
 
-  - type: custom:truma-climate-dial-card
-    entity: climate.truma_inetx_ffb4d1
-    name: Raumheizung
+  - type: custom:truma-operation-card
+    operation_entity: sensor.truma_inetx_ffb4d1_vorgang
+    action: [hvac_mode, temperature, fan_level]
+    card:
+      type: custom:truma-climate-dial-card
+      entity: climate.truma_inetx_ffb4d1
+      name: Raumheizung
 
   - type: tile
     entity: select.truma_inetx_ffb4d1_water_heating
@@ -83,16 +94,20 @@ cards:
     features:
       - type: select-options
 
-  - type: tile
-    entity: select.truma_inetx_ffb4d1_energiequelle
-    name: Energiequelle
-    icon: mdi:engine
-    tap_action:
-      action: more-info
-    icon_tap_action:
-      action: more-info
-    features:
-      - type: select-options
+  - type: custom:truma-operation-card
+    operation_entity: sensor.truma_inetx_ffb4d1_vorgang
+    action: energy_source
+    card:
+      type: tile
+      entity: select.truma_inetx_ffb4d1_energiequelle
+      name: Energiequelle
+      icon: mdi:engine
+      tap_action:
+        action: more-info
+      icon_tap_action:
+        action: more-info
+      features:
+        - type: select-options
 
   - type: tile
     entity: select.truma_inetx_ffb4d1_electric_heating_output
