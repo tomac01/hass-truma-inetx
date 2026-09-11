@@ -136,6 +136,7 @@ class _Coordinator:
             flame_status=None,
             raw_params={"EnergySrc.GasLevel": 0},
         )
+        self.panel_link_connected = connected
         self.proxy_available = proxy_available
 
 
@@ -175,7 +176,11 @@ def test_ble_link_and_proxy_online_states_are_independent() -> None:
     assert proxy.is_on is True
     assert link.available and proxy.available
 
+    # Cached Truma values may remain available between five-minute polls while
+    # the physical BLE session itself is already closed.
     coordinator.data.connected = True
+    assert link.is_on is False
+    coordinator.panel_link_connected = True
     coordinator.proxy_available = False
     assert link.is_on is True
     assert proxy.is_on is False

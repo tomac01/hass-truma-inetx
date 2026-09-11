@@ -8,8 +8,8 @@
 
 Lokale Push-Integration für das Bedienteil **Truma iNet X** über Bluetooth LE.
 Sie liest Raum-, Wasser- und Innentemperatur sowie Versorgungsspannung und
-steuert Heizmodus, Solltemperatur, Warmwasser, elektrische Heizleistung,
-Dieselbrenner und Lüfter – ohne Cloud, Truma-Konto oder LIN-Verkabelung.
+steuert Heizmodus, Solltemperatur, Warmwasser, Energiequelle, elektrische
+Heizleistung und Lüfter – ohne Cloud, Truma-Konto oder LIN-Verkabelung.
 
 Dieser Fork ergänzt Entitäten für eine sofortige BLE-Aktualisierung und einen
 zeitlich begrenzten Live-Modus. Das Originalprojekt bleibt die Upstream-Basis.
@@ -90,8 +90,9 @@ Verbindung wird der Hinweis automatisch entfernt.
 | Innentemperatur | `sensor` | °C |
 | Versorgungsspannung | `sensor` | V |
 | Warmwasser | `select` | Aus / Eco (40 °C) / Comfort (60 °C) / Hot (70 °C), soweit vom Bedienteil angeboten |
-| Elektrische Heizleistung | `select` | Zusätzlicher Heizstab: aus / 900 W / 1800 W. Nur bei Fahrzeugen mit elektrischem Heizelement |
-| Dieselbrenner | `switch` | Nur bei Heizungen mit Dieselbrenner |
+| Energiequelle | `select` | Diesel / Elektro / Hybrid. Nur bei Dieselheizungen mit elektrischem Heizelement. Elektro und Hybrid starten aus Sicherheitsgründen immer mit 900 W |
+| Elektrische Heizleistung | `select` | 900 W / 1800 W. Nur in Elektro- und Hybridbetrieb aktiv |
+| Dieselbrenner (technisch) | `switch` | Diagnose-/Kompatibilitätsentität; die normale Bedienung erfolgt über Energiequelle |
 | Gas | `binary_sensor` | Zeigt, ob die Heizung Gas verwendet. Schreibgeschützt und nur bei Gasheizungen |
 | Lüfterstufe | `number` | 0–10 |
 | Live-Modus-Dauer | `number` | Ganze Minuten von 0 bis 999 |
@@ -110,7 +111,8 @@ Verbindung wird der Hinweis automatisch entfernt.
 | Aufbaubatterie | `sensor` | V, nur wenn `L1Bat.Voltage` gemeldet wird |
 | Flammenstatus | `sensor` | Diagnose, standardmäßig deaktiviert; Rohwert von `System.FlameStatus` |
 
-Die Modusliste der Climate-Entität und die Optionen der beiden Select-Entitäten
+Die Modusliste der Climate-Entität und die Optionen für Warmwasser und
+elektrische Leistung
 sind nicht fest vorgegeben. Das Bedienteil beschreibt die Parameter des
 konkreten Fahrzeugs. Ein Fahrzeug ohne Klimaanlage erhält deshalb keinen
 Kühlmodus; eine Heizung ohne elektrisches Element bietet keine 1800 W an. Wenn
@@ -141,11 +143,11 @@ sein eigener Parameter gemeldet wird. Ein Diagnosedownload eines Fahrzeugs,
 das einen dieser Werte meldet, würde die offene Frage aus
 [#7](https://github.com/rpodgorny/hass-truma-inetx/issues/7) klären.
 
-Die Bedeutung von `System.FlameStatus` ist nicht veröffentlicht. Der Wert kann
-0, 1 oder 2 sein. Der binäre Flammensensor behandelt deshalb jeden Wert ungleich
-null als aktiv. Der Typcode entspricht den Feldern
-`AirCirculation.Active` und anderen `Active`-Feldern mit den Zuständen Aus,
-Aktiv und Leerlauf. Das ist ein belastbarer Hinweis, aber noch kein Beweis.
+Die Bedeutung von `System.FlameStatus` ist nicht veröffentlicht. Am Fahrzeug
+wurde sie gegen die reale Leistungsaufnahme geprüft: `0` bedeutet aus, `1`
+aktiv und `2` Bereitschaft. Der binäre Flammensensor ist deshalb nur bei `1`
+eingeschaltet; der Rohwert bleibt als standardmäßig deaktivierter
+Diagnosesensor verfügbar.
 
 Die Optionen der Warmwasser-Auswahl wurden in 0.7.1b4 von
 `40 °C / 60 °C / 70 °C` auf
@@ -409,8 +411,8 @@ gesponsert oder unterstützt.
 
 Local push integration for the **Truma iNet X** control panel over Bluetooth LE.
 Reads room/water/internal temperatures and supply voltage, and controls heating
-mode, target temperature, water heating, electric heating level, the diesel
-burner and the fan — no cloud, no Truma account, no LIN wiring.
+mode, target temperature, water heating, energy source, electric heating output
+and the fan — no cloud, no Truma account, no LIN wiring.
 
 This fork adds entities for an immediate BLE refresh and a timed live session.
 The original project remains its upstream source.
@@ -485,8 +487,9 @@ and clears the issue on the next successful connect.
 | Internal temperature | `sensor` | °C |
 | Supply voltage | `sensor` | V |
 | Water heating | `select` | Off / Eco (40 °C) / Comfort (60 °C) / Hot (70 °C) — the steps the panel offers |
-| Electric heating | `select` | Supplemental electric element: off / 900 W / 1800 W — the steps the panel offers. Only where the vehicle has the element |
-| Diesel burner | `switch` | Only where the heater has a diesel burner |
+| Energy source | `select` | Diesel / Electric / Hybrid. Only on diesel heaters with an electric element. Electric and Hybrid always enter at the safer 900 W level |
+| Electric heating output | `select` | 900 W / 1800 W. Available only in Electric and Hybrid operation |
+| Diesel burner (technical) | `switch` | Diagnostic/backwards-compatibility entity; use Energy source for normal control |
 | Gas | `binary_sensor` | Whether the heater is drawing on gas. Read-only — the heater moves this itself. Only where it burns gas |
 | Fan level | `number` | 0–10 |
 | Live mode duration | `number` | Whole minutes from 0 through 999 |
@@ -505,7 +508,7 @@ and clears the issue on the next successful connect.
 | Leisure battery | `sensor` | V — only where something reports `L1Bat.Voltage` |
 | Flame status | `sensor` | Diagnostic, disabled by default — the raw `System.FlameStatus` value |
 
-The climate entity's mode list and the two selects' options are not fixed. The
+The climate entity's mode list and the water/electric-output options are not fixed. The
 panel enumerates each parameter for the vehicle it is installed in — a van with no air conditioner
 does not list a cooling mode, and a heater without the electric element does
 not list 1800 W — so the entities offer what the panel offers, falling back to
@@ -538,13 +541,10 @@ waits for its own parameter, so a heater that reports neither is given neither.
 If yours shows one of them, a diagnostics download naming it would settle the
 question — see issue #7.
 
-The flame status sensor exists because nothing published says what
-`System.FlameStatus` means. It takes 0, 1 and 2; the binary sensor above has to
-answer on or off, and does it by treating anything non-zero as lit. The panel
-describes the parameter with the same type code it gives `AirCirculation.Active`
-and the other `Active` fields, which are the protocol's OFF / ACTIVE / IDLE
-triple — good evidence, not proof. Watching the raw value through an ignition
-is what would settle it.
+Nothing published defines `System.FlameStatus`, but it has been checked on the
+vehicle against real shore-power draw: 0 is off, 1 is firing and 2 is standby.
+The binary sensor is therefore on only for 1; the raw value remains available
+as a diagnostic sensor that is disabled by default.
 
 The water select's options changed in 0.7.1b4, from `40 °C / 60 °C / 70 °C` to
 `Eco (40 °C) / Comfort (60 °C) / Hot (70 °C)`, so that the name matches what the

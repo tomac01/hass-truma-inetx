@@ -73,8 +73,16 @@
       }
     },
     "select": {
+      "energy_source": {
+        "name": "Energy source",
+        "state": {
+          "diesel": "Diesel",
+          "electric": "Electric",
+          "hybrid": "Hybrid"
+        }
+      },
       "electric_level": {
-        "name": "Electric heating"
+        "name": "Electric heating output"
       },
       "water_mode": {
         "name": "Water heating"
@@ -114,7 +122,7 @@
     },
     "switch": {
       "diesel": {
-        "name": "Diesel burner"
+        "name": "Diesel burner (technical)"
       },
       "faster_water_heating": {
         "name": "Faster water heating"

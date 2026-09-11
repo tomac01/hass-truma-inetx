@@ -28,7 +28,8 @@ What it pins:
    Combi 6 E), so only the values cross over,
 4. a write is validated against the panel's enum where there is one, so a mode
    this heater really has stops being rejected by our own table,
-5. off is always offered, whatever the panel says,
+5. off stays part of water heating, while energy source owns switching the
+   electric element off,
 6. and the electric select is not created at all until the vehicle reports an
    electric element -- a Combi D has none, and its panel never mentions the
    parameter.
@@ -220,16 +221,16 @@ def test_a_step_the_vehicle_does_not_have_is_not_offered() -> None:
     })
 
     options = SELECT.TrumaElectricLevelSelect.options.fget(_Holder(state))
-    assert options == ["off", "900 W"], options
+    assert options == ["900 W"], options
 
 
-def test_a_silent_panel_leaves_both_selects_as_they_were() -> None:
+def test_a_silent_panel_uses_the_safe_fallback_steps() -> None:
     state = STATE.TrumaState()
     assert SELECT.TrumaWaterModeSelect.options.fget(_Holder(state)) == [
         "off", "Eco (40 °C)", "Comfort (60 °C)", "Hot (70 °C)",
     ]
     assert SELECT.TrumaElectricLevelSelect.options.fget(_Holder(state)) == [
-        "off", "900 W", "1800 W",
+        "900 W", "1800 W",
     ]
 
 

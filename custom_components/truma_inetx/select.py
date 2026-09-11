@@ -7,7 +7,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from .coordinator import TrumaConfigEntry, TrumaCoordinator
-from .entity import TrumaEntity, async_add_when_reported
+from .entity import TrumaEntity, async_add_when_all_reported, async_add_when_reported
 
 # Entities are coordinator-driven and have no update() method, so Home
 # Assistant would create no semaphore anyway; stated explicitly.
@@ -24,8 +24,13 @@ WATER_OPTIONS = {WATER_OFF: None} | {
     label: value for value, label in _WATER_MODE_TO_LABEL.items()
 }
 
-_ELECTRIC_VALUE_TO_LABEL = {0: "off", 1: "900 W", 2: "1800 W"}
+_ELECTRIC_VALUE_TO_LABEL = {1: "900 W", 2: "1800 W"}
 ELECTRIC_OPTIONS = {label: value for value, label in _ELECTRIC_VALUE_TO_LABEL.items()}
+
+ENERGY_DIESEL = "diesel"
+ENERGY_ELECTRIC = "electric"
+ENERGY_HYBRID = "hybrid"
+ENERGY_OPTIONS = [ENERGY_DIESEL, ENERGY_ELECTRIC, ENERGY_HYBRID]
 
 
 def _offered(state, topic: str, param: str, labels: dict) -> list:
@@ -67,6 +72,12 @@ async def async_setup_entry(
         async_add_entities,
         {"EnergySrc.ElectricLevel": lambda: TrumaElectricLevelSelect(coordinator)},
     )
+    async_add_when_all_reported(
+        coordinator,
+        async_add_entities,
+        {"EnergySrc.DieselLevel", "EnergySrc.ElectricLevel"},
+        lambda: TrumaEnergySourceSelect(coordinator),
+    )
 
 
 class TrumaWaterModeSelect(TrumaEntity, SelectEntity):
@@ -105,7 +116,7 @@ class TrumaWaterModeSelect(TrumaEntity, SelectEntity):
 
 
 class TrumaElectricLevelSelect(TrumaEntity, SelectEntity):
-    """Supplemental electric heating level (off / 900 / 1800 W)."""
+    """Electric heating output while an electric energy source is active."""
 
     _attr_translation_key = "electric_level"
 
@@ -125,9 +136,14 @@ class TrumaElectricLevelSelect(TrumaEntity, SelectEntity):
         )
 
     @property
+    def available(self) -> bool:
+        """Only offer output selection in electric or hybrid operation."""
+        return super().available and bool(self.data.electric_level)
+
+    @property
     def current_option(self) -> str | None:
         """Return the current electric heating level."""
-        if self.data.electric_level is None:
+        if not self.data.electric_level:
             return None
         return _ELECTRIC_VALUE_TO_LABEL.get(self.data.electric_level)
 
@@ -136,3 +152,56 @@ class TrumaElectricLevelSelect(TrumaEntity, SelectEntity):
         await self.coordinator.async_write(
             "EnergySrc", "ElectricLevel", ELECTRIC_OPTIONS[option]
         )
+
+
+class TrumaEnergySourceSelect(TrumaEntity, SelectEntity):
+    """Choose diesel, electric or hybrid heating."""
+
+    _attr_translation_key = "energy_source"
+    _attr_options = ENERGY_OPTIONS
+    _attr_icon = "mdi:engine"
+
+    def __init__(self, coordinator: TrumaCoordinator) -> None:
+        """Initialize."""
+        super().__init__(coordinator, "energy_source")
+
+    @property
+    def options(self) -> list[str]:
+        """Return the three coordinated source modes."""
+        return ENERGY_OPTIONS
+
+    @property
+    def current_option(self) -> str | None:
+        """Derive the user-facing source from both hardware levels."""
+        diesel = self.data.diesel_level
+        electric = self.data.electric_level
+        if diesel is None or electric is None:
+            return None
+        if diesel and electric:
+            return ENERGY_HYBRID
+        if diesel:
+            return ENERGY_DIESEL
+        if electric:
+            return ENERGY_ELECTRIC
+        return None
+
+    async def async_select_option(self, option: str) -> None:
+        """Apply a source safely, always entering electric modes at 900 W."""
+        if option == ENERGY_DIESEL:
+            commands = [
+                ("EnergySrc", "DieselLevel", 1),
+                ("EnergySrc", "ElectricLevel", 0),
+            ]
+        elif option == ENERGY_ELECTRIC:
+            commands = [
+                ("EnergySrc", "ElectricLevel", 1),
+                ("EnergySrc", "DieselLevel", 0),
+            ]
+        elif option == ENERGY_HYBRID:
+            commands = [
+                ("EnergySrc", "DieselLevel", 1),
+                ("EnergySrc", "ElectricLevel", 1),
+            ]
+        else:
+            raise ValueError(f"Unknown energy source: {option}")
+        await self.coordinator.async_write_many(commands)

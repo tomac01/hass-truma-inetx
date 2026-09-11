@@ -87,6 +87,10 @@ def _load():
         def __init__(self, coordinator) -> None:
             self.coordinator = coordinator
 
+        @property
+        def available(self) -> bool:
+            return True
+
     _mod("homeassistant", __path__=[])
     _mod("homeassistant.core", HomeAssistant=object, callback=lambda f: f)
     _mod(
@@ -126,6 +130,7 @@ def _load():
         SwitchEntity=object,
         SwitchDeviceClass=types.SimpleNamespace(SWITCH="switch"),
     )
+    _mod("homeassistant.components.select", SelectEntity=object)
 
     _mod("truma_pkg", __path__=[str(SRC)])
     _mod("truma_pkg.truma", __path__=[str(SRC / "truma")])
@@ -155,10 +160,11 @@ def _load():
         _real("sensor"),
         _real("switch"),
         _real("binary_sensor"),
+        _real("select"),
     )
 
 
-STATE, SENSOR, SWITCH, BINARY = _load()
+STATE, SENSOR, SWITCH, BINARY, SELECT = _load()
 
 # The electrical block, as measured on the vehicles reported so far. Named
 # here only to prove nothing in the source needs to name it.
@@ -199,6 +205,9 @@ class _FakeCoordinator:
 
     async def async_write(self, topic: str, param: str, value: int) -> None:
         self.writes.append((topic, param, value))
+
+    async def async_write_many(self, commands) -> None:
+        self.writes.extend(commands)
 
 
 def _setup(platform, coordinator) -> list:
@@ -284,6 +293,73 @@ def test_the_diesel_switch_waits_for_a_diesel_burner() -> None:
     coordinator.report("EnergySrc", "DieselLevel", 1, HEATER)
     assert _names(made) == ["TrumaDieselSwitch"], made
     assert made[0].is_on is True
+
+
+def test_energy_source_appears_only_for_diesel_heater_with_electric_element() -> None:
+    coordinator = _FakeCoordinator()
+    made = _setup(SELECT, coordinator)
+    assert _names(made) == ["TrumaWaterModeSelect"]
+
+    coordinator.report("EnergySrc", "DieselLevel", 1, HEATER)
+    assert _names(made) == ["TrumaWaterModeSelect"]
+
+    coordinator.report("EnergySrc", "ElectricLevel", 0, HEATER)
+    assert _names(made) == [
+        "TrumaWaterModeSelect",
+        "TrumaElectricLevelSelect",
+        "TrumaEnergySourceSelect",
+    ]
+
+
+def test_energy_source_maps_states_and_uses_safe_900_w_transitions() -> None:
+    coordinator = _FakeCoordinator()
+    coordinator.report("EnergySrc", "DieselLevel", 1, HEATER)
+    coordinator.report("EnergySrc", "ElectricLevel", 0, HEATER)
+    source = SELECT.TrumaEnergySourceSelect(coordinator)
+
+    assert source.options == ["diesel", "electric", "hybrid"]
+    assert source.current_option == "diesel"
+
+    asyncio.run(source.async_select_option("electric"))
+    assert coordinator.writes == [
+        ("EnergySrc", "ElectricLevel", 1),
+        ("EnergySrc", "DieselLevel", 0),
+    ]
+
+    coordinator.writes.clear()
+    asyncio.run(source.async_select_option("hybrid"))
+    assert coordinator.writes == [
+        ("EnergySrc", "DieselLevel", 1),
+        ("EnergySrc", "ElectricLevel", 1),
+    ]
+
+    coordinator.writes.clear()
+    asyncio.run(source.async_select_option("diesel"))
+    assert coordinator.writes == [
+        ("EnergySrc", "DieselLevel", 1),
+        ("EnergySrc", "ElectricLevel", 0),
+    ]
+
+
+def test_electric_power_is_only_available_for_electric_or_hybrid() -> None:
+    coordinator = _FakeCoordinator()
+    coordinator.data.connected = True
+    coordinator.report("EnergySrc", "DieselLevel", 1, HEATER)
+    coordinator.report("EnergySrc", "ElectricLevel", 0, HEATER)
+    level = SELECT.TrumaElectricLevelSelect(coordinator)
+
+    assert level.available is False
+    assert level.current_option is None
+    assert level.options == ["900 W", "1800 W"]
+
+    coordinator.report("EnergySrc", "ElectricLevel", 1, HEATER)
+    assert level.available is True
+    assert level.current_option == "900 W"
+
+
+def test_legacy_diesel_switch_is_a_diagnostic_control() -> None:
+    diesel = SWITCH.TrumaDieselSwitch(_FakeCoordinator())
+    assert diesel._attr_entity_category is _EntityCategory.DIAGNOSTIC
 
 
 def test_the_batteries_appear_only_where_something_reports_them() -> None:

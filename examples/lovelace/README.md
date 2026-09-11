@@ -50,6 +50,13 @@ eingerichteten Installation. Wenn ein eigener Suffix abweicht, muss die
 betroffene vollständige Entity-ID ebenfalls ersetzt werden. Maßgeblich ist
 immer die auf der Truma-Geräteseite angezeigte ID.
 
+Die Karte verwendet **Energiequelle** als zentrale Auswahl. Beim Wechsel auf
+Elektro oder Hybrid aktiviert die Integration den Heizstab zunächst mit
+900 W; anschließend kann **Elektrische Heizleistung** auf 1800 W gestellt
+werden. Bei Diesel ist diese Leistungswahl automatisch deaktiviert. Der alte
+Dieselbrenner-Schalter bleibt nur als technische Diagnoseentität erhalten und
+gehört nicht in die normale Bedienkarte.
+
 ## In ein Storage-Dashboard importieren
 
 1. Gewünschtes Dashboard öffnen und **Dashboard bearbeiten** wählen.
@@ -126,8 +133,11 @@ The button cards contain the prefix twice, in `entity` and
 4. Replace the example entity prefix.
 5. Check the preview and save.
 
-Remove cards for optional entities that the installed heater does not expose,
-such as electric heating or a diesel burner.
+Remove cards for optional entities that the installed heater does not expose.
+The **Energy source** select coordinates Diesel / Electric / Hybrid. Electric
+and Hybrid always start at 900 W; the **Electric heating output** select then
+offers 900 W or 1800 W and is disabled again in Diesel mode. The legacy diesel
+switch remains only as a technical diagnostic entity.
 
 ## Live mode
 

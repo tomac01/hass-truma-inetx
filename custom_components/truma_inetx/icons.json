@@ -27,6 +27,14 @@
         "default": "mdi:bluetooth-off"
       }
     },
+    "select": {
+      "energy_source": {
+        "default": "mdi:engine"
+      },
+      "electric_level": {
+        "default": "mdi:flash"
+      }
+    },
     "switch": {
       "diesel": {
         "default": "mdi:fuel"

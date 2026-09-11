@@ -110,6 +110,7 @@ class _Coord:
         self._client = None
         self._wake_event = asyncio.Event()
         self._connected_event = asyncio.Event()
+        self._write_ready_event = asyncio.Event()
         self._stop_event = asyncio.Event()
         self._stop = False
         self._writes_pending = 0
@@ -125,6 +126,7 @@ class _Coord:
     _wait_before_retry = COORD.TrumaCoordinator._wait_before_retry
     _reconnect_delay = COORD.TrumaCoordinator._reconnect_delay
     _finish_startup = COORD.TrumaCoordinator._finish_startup
+    _client_for_write = COORD.TrumaCoordinator._client_for_write
 
     async def _request_measurements(self, _client) -> None:
         # A healthy panel answers the periodic on-demand request with a frame.
@@ -235,6 +237,23 @@ def test_live_mode_uses_short_reconnect_delay() -> None:
     assert coord._reconnect_delay(connected=False, current=45) == 15
     coord.clock.now = 201
     assert coord._reconnect_delay(connected=False, current=30) == 30
+
+
+def test_write_waits_for_registered_session_not_full_parameter_discovery() -> None:
+    async def _case():
+        coord = _Coord()
+        coord._client = _Client()
+        task = asyncio.create_task(coord._client_for_write())
+        await asyncio.sleep(0)
+        assert not task.done(), "write escaped before registration and identity"
+
+        # This event is published immediately after the transport handshake;
+        # the full-refresh event remains unset until discovery is complete.
+        coord._write_ready_event.set()
+        assert await asyncio.wait_for(task, 0.1) is coord._client
+        assert not coord._connected_event.is_set()
+
+    asyncio.run(_case())
 
 
 def test_hold_timer_starts_only_after_startup_finishes() -> None:

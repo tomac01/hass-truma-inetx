@@ -120,7 +120,7 @@ class TrumaConnectionSensor(TrumaEntity, BinarySensorEntity):
     @property
     def is_on(self) -> bool:
         """Whether the BLE link to the panel is up."""
-        return self.data.connected
+        return self.coordinator.panel_link_connected
 
 
 class TrumaProxySensor(TrumaEntity, BinarySensorEntity):

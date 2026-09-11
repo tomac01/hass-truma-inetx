@@ -216,6 +216,7 @@ class _Coord:
         self._stop = False
         self._writes_pending = 0
         self._connected_event = asyncio.Event()
+        self._write_ready_event = asyncio.Event()
         self._identity = {
             "muid": "MUID", "uuid": "uuid", "username": "Home Assistant",
         }

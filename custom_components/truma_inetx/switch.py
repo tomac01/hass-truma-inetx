@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from homeassistant.components.switch import SwitchDeviceClass, SwitchEntity
+from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
@@ -56,6 +57,10 @@ class TrumaDieselSwitch(TrumaEntity, SwitchEntity):
 
     _attr_translation_key = "diesel"
     _attr_device_class = SwitchDeviceClass.SWITCH
+    # Kept for backwards compatibility and troubleshooting. The normal user
+    # control is the energy-source select, which coordinates diesel and the
+    # electric element without allowing an unintended all-off combination.
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
 
     def __init__(self, coordinator: TrumaCoordinator) -> None:
         """Initialize."""

@@ -185,7 +185,15 @@ class TrumaCoordinator(DataUpdateCoordinator[TrumaState]):
         # nudges the loop awake and holds the link open until it has been sent.
         self._wake_event = asyncio.Event()
         self._connected_event = asyncio.Event()
+        # Transport handshake complete: writes may run before the slower full
+        # parameter discovery. Kept separate from _connected_event, which is
+        # the promise made by manual refresh that all values are refreshed.
+        self._write_ready_event = asyncio.Event()
         self._writes_pending = 0
+        # Actual BLE session state. TrumaState.connected deliberately remains
+        # true between polls so cached controls stay available; this flag is
+        # what the user-facing BLE-Truma-Verbindung sensor reports instead.
+        self._panel_link_connected = False
         # A dashboard request can wake poll mode without faking a parameter
         # write.  The requested hold starts only after startup has completed,
         # so a slow BLE handshake never consumes the user's live-mode time.
@@ -203,6 +211,19 @@ class TrumaCoordinator(DataUpdateCoordinator[TrumaState]):
     def proxy_available(self) -> bool | None:
         """Whether the ESPHome proxy used for this panel is registered."""
         return self._proxy_tracker.available
+
+    @property
+    def panel_link_connected(self) -> bool:
+        """Whether a physical BLE session to the Truma panel is open now."""
+        return self._panel_link_connected
+
+    @callback
+    def _set_panel_link_connected(self, connected: bool) -> None:
+        """Publish an actual panel-link transition for entities and Logbook."""
+        if self._panel_link_connected == connected:
+            return
+        self._panel_link_connected = connected
+        self.async_set_updated_data(self._state)
 
     @callback
     def _async_proxy_changed(self) -> None:
@@ -278,7 +299,9 @@ class TrumaCoordinator(DataUpdateCoordinator[TrumaState]):
         """
         client = self._client
         self._client = None
+        self._write_ready_event.clear()
         if client is None:
+            self._set_panel_link_connected(False)
             LOGGER.debug("Truma %s: no live BLE link to close", self.unique_id)
             return
         try:
@@ -286,6 +309,8 @@ class TrumaCoordinator(DataUpdateCoordinator[TrumaState]):
             LOGGER.debug("Truma %s: BLE link closed cleanly", self.unique_id)
         except Exception as exc:  # noqa: BLE001 - teardown must not raise
             LOGGER.debug("Truma %s disconnect: %s", self.unique_id, exc)
+        finally:
+            self._set_panel_link_connected(False)
 
     async def _load_identity(self) -> dict:
         """Load the persisted app identity, or create and store a new one."""
@@ -328,6 +353,7 @@ class TrumaCoordinator(DataUpdateCoordinator[TrumaState]):
                 # slot (the ghost that otherwise needs a manual power-cycle).
                 await self._disconnect_client()
                 self._connected_event.clear()
+                self._write_ready_event.clear()
             if connected and self.poll_interval and not self._stop:
                 # Poll mode: the link going away is the plan, not a fault. The
                 # reading we just took is still the current state, so leave the
@@ -399,6 +425,7 @@ class TrumaCoordinator(DataUpdateCoordinator[TrumaState]):
         resets the backoff). Raises if the connection could not be established.
         """
         assert self._identity is not None
+        self._write_ready_event.clear()
         client = TrumaBleClient(self._identity)
         client.on_data(self._on_frame)
         # Track the client before connecting so a failed/partial connect is
@@ -420,6 +447,7 @@ class TrumaCoordinator(DataUpdateCoordinator[TrumaState]):
                 self._remember_proxy_for_address(initial.address)
                 self._last_addr = None
                 await client.adopt(initial)
+                self._set_panel_link_connected(True)
                 return await self._finish_startup(client)
             # Handed-off link dropped in the setup gap — discard and connect
             # fresh below.
@@ -485,6 +513,7 @@ class TrumaCoordinator(DataUpdateCoordinator[TrumaState]):
                 "Truma %s: connecting without a fresh advert", self.unique_id
             )
         await client.connect(ble_device)
+        self._set_panel_link_connected(True)
         # The connection established, so this address is not the phantom —
         # clear the blame marker so a later failure (startup, a mid-session
         # drop) does not wrongly banish a perfectly good address.
@@ -721,6 +750,20 @@ class TrumaCoordinator(DataUpdateCoordinator[TrumaState]):
             await client.send(frame)
             await asyncio.sleep(0.5)
 
+        # Commands requested while the integration was sleeping can now be
+        # addressed safely. Let the waiting write batch finish before the
+        # 13-second parameter discovery starts, which keeps a dashboard action
+        # responsive without weakening the full-refresh guarantee.
+        self._write_ready_event.set()
+        if self._writes_pending:
+            deadline = self.hass.loop.time() + 20
+            while (
+                self._writes_pending
+                and client.connected
+                and self.hass.loop.time() < deadline
+            ):
+                await asyncio.sleep(0.05)
+
         # 4. Request current values from every device on the bus.
         await self._discover_params(client)
 
@@ -942,16 +985,15 @@ class TrumaCoordinator(DataUpdateCoordinator[TrumaState]):
         poll will not hang up while the write is outstanding.
         """
         client = self._client
-        if client is not None and client.connected:
-            return client
-        if not self.poll_interval:
-            raise HomeAssistantError("Truma panel is not connected")
-
-        LOGGER.debug("Truma %s: write requested; waking a poll", self.unique_id)
-        self._wake_event.set()
+        if client is None or not client.connected:
+            if not self.poll_interval:
+                raise HomeAssistantError("Truma panel is not connected")
+            LOGGER.debug("Truma %s: write requested; waking a poll", self.unique_id)
+            self._write_ready_event.clear()
+            self._wake_event.set()
         try:
             await asyncio.wait_for(
-                self._connected_event.wait(), timeout=_WRITE_CONNECT_TIMEOUT
+                self._write_ready_event.wait(), timeout=_WRITE_CONNECT_TIMEOUT
             )
         except TimeoutError:
             raise HomeAssistantError(
@@ -962,15 +1004,18 @@ class TrumaCoordinator(DataUpdateCoordinator[TrumaState]):
             raise HomeAssistantError("Truma panel is not connected")
         return client
 
-    async def async_write(self, topic: str, param: str, value: int) -> None:
-        """Validate and send a parameter write to the panel/heater.
+    async def async_write_many(
+        self, commands: list[tuple[str, str, int]]
+    ) -> None:
+        """Validate and send one atomic user action to the panel/heater.
 
         The panel confirms by pushing an updated value, which flows back through
         the normal notification path and updates the entity.
         """
-        ok, msg = self._state.validate_write(topic, param, value)
-        if not ok:
-            raise HomeAssistantError(f"Invalid Truma command: {msg}")
+        for topic, param, value in commands:
+            ok, msg = self._state.validate_write(topic, param, value)
+            if not ok:
+                raise HomeAssistantError(f"Invalid Truma command: {msg}")
 
         # Held across the whole write, not just the wait for a link: in poll
         # mode the loop checks this before hanging up, and releasing it early
@@ -979,14 +1024,21 @@ class TrumaCoordinator(DataUpdateCoordinator[TrumaState]):
         try:
             client = await self._client_for_write()
 
-            dest = self._state.get_command_dest(topic)
-            frame = build_write_frame(client.assigned_addr, dest, topic, param, value)
-            LOGGER.debug(
-                "Truma write %s.%s = %s -> 0x%04X", topic, param, value, dest
-            )
-            if not await client.send(frame):
-                raise HomeAssistantError(
-                    f"Truma did not acknowledge write {topic}.{param}={value}"
+            for topic, param, value in commands:
+                dest = self._state.get_command_dest(topic)
+                frame = build_write_frame(
+                    client.assigned_addr, dest, topic, param, value
                 )
+                LOGGER.debug(
+                    "Truma write %s.%s = %s -> 0x%04X", topic, param, value, dest
+                )
+                if not await client.send(frame):
+                    raise HomeAssistantError(
+                        f"Truma did not acknowledge write {topic}.{param}={value}"
+                    )
         finally:
             self._writes_pending -= 1
+
+    async def async_write(self, topic: str, param: str, value: int) -> None:
+        """Send one parameter write as an atomic user action."""
+        await self.async_write_many([(topic, param, value)])

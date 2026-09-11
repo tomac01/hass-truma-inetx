@@ -84,9 +84,9 @@ cards:
       - type: select-options
 
   - type: tile
-    entity: select.truma_inetx_ffb4d1_electric_heating
-    name: Elektroheizung
-    icon: mdi:flash
+    entity: select.truma_inetx_ffb4d1_energiequelle
+    name: Energiequelle
+    icon: mdi:engine
     tap_action:
       action: more-info
     icon_tap_action:
@@ -95,15 +95,15 @@ cards:
       - type: select-options
 
   - type: tile
-    entity: switch.truma_inetx_ffb4d1_diesel_burner
-    name: Dieselbrenner freigeben
-    icon: mdi:gas-burner
+    entity: select.truma_inetx_ffb4d1_electric_heating_output
+    name: Elektrische Heizleistung
+    icon: mdi:flash
     tap_action:
       action: more-info
     icon_tap_action:
-      action: toggle
-      confirmation:
-        text: Dieselbrenner-Freigabe wirklich umschalten?
+      action: more-info
+    features:
+      - type: select-options
 
   - type: tile
     entity: number.truma_inetx_ffb4d1_fan_level
