@@ -324,11 +324,30 @@ def install_homeassistant() -> None:
 
 
 def load(name: str, package: str = "truma_pkg", path: Path = SRC) -> ModuleType:
-    """Import one real module out of the integration, by file."""
+    """Import one real module out of the integration, by file.
+
+    Always compiles from source. ``SourceFileLoader`` accepts a cached ``.pyc``
+    whenever the source's mtime (rounded to whole seconds) and byte size are
+    unchanged -- and a mutation test makes exactly that kind of edit: flip a
+    comparison, swap ``1`` for ``2``, all within the same second. Measured on
+    2026-09-26: three real mutations appeared to survive because the stale
+    bytecode ran instead. A test that cannot see the mutation proves nothing,
+    so this pays a recompile per load to keep mutation testing honest.
+    """
     spec = importlib.util.spec_from_file_location(
         f"{package}.{name}", path / f"{name}.py"
     )
     assert spec is not None and spec.loader is not None
+    loader = spec.loader
+    source_to_code = getattr(loader, "source_to_code", None)
+    get_data = getattr(loader, "get_data", None)
+    if source_to_code is not None and get_data is not None:
+        def _fresh_code(fullname: str, _loader=loader) -> object:
+            """Compile the file as it is on disk right now, cache be damned."""
+            filename = _loader.get_filename(fullname)
+            return _loader.source_to_code(_loader.get_data(filename), filename)
+
+        loader.get_code = _fresh_code
     module = importlib.util.module_from_spec(spec)
     sys.modules[f"{package}.{name}"] = module
     spec.loader.exec_module(module)
