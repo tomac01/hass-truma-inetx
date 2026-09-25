@@ -1,7 +1,13 @@
 # Truma iNet X (BLE) — Home Assistant integration
 
+> **Fork-Hinweis:** Dies ist der Fork `tomac01/hass-truma-inetx`. Er folgt dem
+> Upstream `rpodgorny/hass-truma-inetx` (hier: `v0.9.0b23`) und ergänzt ihn um
+> bestätigte Schreibvorgänge, den Live-Modus, getrennte Verbindungssensoren,
+> die kombinierte Energiequellen-Auswahl und die Vorgangs-Rückmeldung.
+> Siehe `docs/user-guide.md` und `docs/upgrading-fork.md`.
+
 [![HACS: custom](https://img.shields.io/badge/HACS-custom-41BDF5.svg)](https://hacs.xyz/docs/faq/custom_repositories)
-[![Validate](https://github.com/rpodgorny/hass-truma-inetx/actions/workflows/validate.yml/badge.svg)](https://github.com/rpodgorny/hass-truma-inetx/actions/workflows/validate.yml)
+[![Validate](https://github.com/tomac01/hass-truma-inetx/actions/workflows/validate.yml/badge.svg)](https://github.com/tomac01/hass-truma-inetx/actions/workflows/validate.yml)
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
 
 Local push integration for the **Truma iNet X** control panel over Bluetooth LE.
