@@ -14,8 +14,9 @@ Was der Test festnagelt:
 3. die Dauer ist eine ganzzahlige Box von 0 bis 999 Minuten, die Grenzwerte
    annimmt, alles andere abweist und dabei den zuletzt gültigen Wert behält,
 4. das Stellen der Dauer fasst BLE nicht an,
-5. sie wird nach einem Neustart wiederhergestellt -- auch dann noch, wenn das
-   Wiederhergestellte unbrauchbar ist,
+5. sie wird nach einem Neustart wiederhergestellt -- sie meldet sich dafür
+   nachweislich bei der Zustandssicherung an und kommt auch dann noch hoch,
+   wenn das Wiederhergestellte unbrauchbar ist,
 6. der Sync-Button reicht genau die eingestellte Dauer weiter,
 7. die Upstream-Entitäten (Fehler-Reset, Parameter-Numbers) bleiben erhalten,
 8. alle drei sind benannt, übersetzt und beikoniert.
@@ -197,6 +198,12 @@ def test_duration_restores_and_forwards() -> None:
     duration._restored = stubs.SimpleNamespace(native_value=37)
     asyncio.run(duration.async_added_to_hass())
 
+    # Erst die Verdrahtung: der Aufruf an die Basisklasse ist in echtem Home
+    # Assistant die Anmeldung bei RestoreStateData. Fällt er weg, wird nie
+    # etwas gespeichert und es gibt beim nächsten Start nichts zu holen --
+    # ein Ausfall, den die beiden Zusicherungen darunter allein nicht sehen,
+    # weil sie den Zweig *nach* dem Wiederherstellen prüfen.
+    assert duration.restore_registered
     assert duration._attr_native_value == 37
     assert coordinator.manual_live_minutes == 37
 
@@ -215,6 +222,9 @@ def test_a_restart_without_a_usable_value_falls_back_to_zero() -> None:
 
         asyncio.run(duration.async_added_to_hass())
 
+        # Auch der Rückfall auf 0 zählt nur, wenn die Entität überhaupt
+        # angemeldet ist -- sonst ist die 0 bloß die Voreinstellung.
+        assert duration.restore_registered, restored
         assert duration._attr_native_value == 0, restored
         assert coordinator.manual_live_minutes == 0, restored
 

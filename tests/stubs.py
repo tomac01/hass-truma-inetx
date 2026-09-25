@@ -281,12 +281,24 @@ def install_homeassistant() -> None:
     mod("homeassistant.components.button", ButtonEntity=object)
     mod("homeassistant.components.select", SelectEntity=object)
     class _RestoreNumber:
-        """RestoreNumber, so weit ein Test sie braucht."""
+        """RestoreNumber, so weit ein Test sie braucht.
+
+        Das Anmelden wird mitgeschrieben, statt ein ``pass`` zu sein: in
+        echtem Home Assistant ist ``async_added_to_hass`` die Anmeldung bei
+        RestoreStateData. Ohne sie wird der Zustand beim Herunterfahren nie
+        gespeichert und ``async_get_last_number_data`` liefert für immer
+        None. Der Stub hält sich daran -- eine Entität, die den
+        ``super()``-Aufruf vergisst, bekommt hier wie dort nichts zurück.
+        """
+
+        restore_registered = False
 
         async def async_added_to_hass(self) -> None:
-            pass
+            self.restore_registered = True
 
         async def async_get_last_number_data(self):
+            if not self.restore_registered:
+                return None
             return getattr(self, "_restored", None)
 
         def async_write_ha_state(self) -> None:
