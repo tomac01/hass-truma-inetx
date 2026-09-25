@@ -68,6 +68,9 @@ class _Coord:
         self._bus.assigned_addr = APP_ADDR
         self._last_frame = 0.0
         self.updates = 0
+        # Kein Rückmeldungsbuch: hier wird nichts geschrieben, und genau
+        # daran erkennt der Frame-Pfad, dass er sich die Buchführung spart.
+        self._write_feedback = {}
 
     def async_set_updated_data(self, _data) -> None:
         self.updates += 1
@@ -78,6 +81,11 @@ class _Coord:
     # coordinator this frame path runs on.
     device_is_named = COORD.TrumaCoordinator.device_is_named
     async_sync_device_names = COORD.TrumaCoordinator.async_sync_device_names
+    # Und seit ein Schreibvorgang auf die Antwort des Geräts wartet: jeder
+    # Frame wird einer wartenden Bestätigung angeboten. Ohne die beiden wäre
+    # dies nicht mehr der Frame-Pfad, auf dem der Coordinator läuft.
+    _note_frame_values = COORD.TrumaCoordinator._note_frame_values
+    on_frame_value = COORD.TrumaCoordinator.on_frame_value
 
 
 def _feed(coord: _Coord, sub_type: int, payload: dict) -> None:

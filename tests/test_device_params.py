@@ -78,10 +78,38 @@ DIAG = stubs.load("diagnostics")
 import cbor2  # noqa: E402  - after the stubs, which put the package on sys.path
 
 
+class _Clock:
+    """Virtuelle Uhr, damit die Fristen des Schreibpfads nicht echt ablaufen."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def time(self) -> float:
+        return self.now
+
+
+class _FastAsyncio:
+    """``asyncio`` für den Coordinator, aber ohne echte Wartezeit.
+
+    Ein Schreibvorgang gibt dem Gerät zwölf Sekunden je Anlauf; echt
+    abgewartet hinge diese Datei minutenlang. Jedes ``sleep`` rückt
+    stattdessen die Uhr vor, an der der Coordinator seine Frist misst.
+    """
+
+    def __init__(self, clock: _Clock) -> None:
+        self._clock = clock
+
+    def __getattr__(self, name):
+        return getattr(asyncio, name)
+
+    async def sleep(self, seconds: float) -> None:
+        self._clock.now += seconds
+        await asyncio.sleep(0)
+
+
 class _Coord:
     """Carries only what ``_on_frame`` and ``device_info`` touch."""
 
-    hass = types.SimpleNamespace(loop=types.SimpleNamespace(time=lambda: 0.0))
     unique_id = "Truma iNetX-FFB4D1"
     last_update_success = True
     # Which kind of address this host connects on; the download reports it, so
@@ -96,11 +124,23 @@ class _Coord:
     hub_device_id = "panel-device-id"
 
     def __init__(self) -> None:
+        self.clock = _Clock()
+        COORD.asyncio = _FastAsyncio(self.clock)
+        self.hass = types.SimpleNamespace(
+            loop=types.SimpleNamespace(time=self.clock.time)
+        )
         self._bus = BUS.Bus()
         self._bus.assigned_addr = APP_ADDR
         self._last_frame = 0.0
         self.updates = 0
+        # Ein Rückmeldungsbuch je laufendem Schreibvorgang; leer heißt, dass
+        # gerade keiner läuft und der Frame-Pfad sich die Buchführung spart.
+        self._write_feedback = {}
         self._writes_pending = 0
+        # Was der Schreibpfad sonst noch führt: der Vorgang, der im
+        # Vorgangs-Sensor landet, und die Haltezeit nach einem Befehl.
+        self._operations = COORD.OperationRegistry(lambda: None)
+        self._command_hold_until = 0.0
 
     @property
     def data(self):
@@ -116,23 +156,57 @@ class _Coord:
     # coordinator this frame path runs on.
     device_is_named = COORD.TrumaCoordinator.device_is_named
     async_sync_device_names = COORD.TrumaCoordinator.async_sync_device_names
+    # Seit ein Schreibvorgang auf die Antwort des Geräts wartet, bietet der
+    # Frame-Pfad jeden Wert einer wartenden Bestätigung an.
+    _note_frame_values = COORD.TrumaCoordinator._note_frame_values
+    on_frame_value = COORD.TrumaCoordinator.on_frame_value
+    # Der ganze Schreibpfad, nicht nur sein Eingang: ``async_write`` ist seit
+    # der Schreibbestätigung nur noch eine Weiterleitung, und die Adressierung
+    # von #10 entscheidet sich eine Ebene tiefer.
     async_write = COORD.TrumaCoordinator.async_write
+    async_write_many = COORD.TrumaCoordinator.async_write_many
+    _write_confirmed = COORD.TrumaCoordinator._write_confirmed
+    _await_feedback = COORD.TrumaCoordinator._await_feedback
+    _request_param_discovery = COORD.TrumaCoordinator._request_param_discovery
+    _feedback_satisfied = staticmethod(COORD.TrumaCoordinator._feedback_satisfied)
+    _infer_action = staticmethod(COORD.TrumaCoordinator._infer_action)
     _client_for_write = COORD.TrumaCoordinator._client_for_write
 
 
 class _Client:
-    """A transport that records the frames handed to it."""
+    """A transport that records the frames handed to it -- and answers them.
+
+    Ein Schreibvorgang gilt erst als erledigt, wenn das Zielgerät den neuen
+    Wert selbst meldet. Dieses Panel meldet deshalb bei der Parameter-Abfrage
+    zurück, was es eben angenommen hat -- über denselben Frame-Pfad, den ein
+    echtes Gerät nähme. Ein Testdouble, das nur quittiert, ließe jeden
+    Schreibtest in drei Anläufe und einen Fehlschlag laufen.
+    """
 
     connected = True
     assigned_addr = APP_ADDR
 
-    def __init__(self) -> None:
+    def __init__(self, coord: "_Coord") -> None:
+        self.coord = coord
         self.sent: list[dict] = []
+        self.writes: list[dict] = []
+        self._pending: list[tuple] = []
 
     async def send(self, frame: bytes, *, probe: bool = False) -> bool:
         parsed = PROTO.parse_v3_frame(frame)
         assert parsed is not None
         self.sent.append(parsed)
+        if parsed.get("sub_type") == TC.MBP_WRITE:
+            self.writes.append(parsed)
+            cbor = parsed["cbor"]
+            self._pending.append(
+                (parsed["dest"], cbor["tn"], cbor["pn"], cbor["v"])
+            )
+            return True
+        if parsed.get("sub_type") == TC.MBP_PARAM_DISC:
+            pending, self._pending = self._pending, []
+            for src, topic, param, value in pending:
+                _report(self.coord, src, topic, param, value)
         return True
 
 
@@ -449,25 +523,30 @@ def test_a_write_is_addressed_to_the_device_the_entity_belongs_to() -> None:
     reads the destination out of the frame the transport was handed.
     """
     coord = _Coord()
-    client = _Client()
+    client = _Client(coord)
     coord._client = client
     _report(coord, ROOF_AC, "AirCooling", "TgtTemp", 220)
 
     asyncio.run(coord.async_write(ROOF_AC, "AirCooling", "TgtTemp", 170))
-    assert [frame["dest"] for frame in client.sent] == [ROOF_AC], (
+    assert [frame["dest"] for frame in client.writes] == [ROOF_AC], (
         "cooling is addressed to the heater again, which swallows it"
+    )
+    # Die Rückfrage, auf deren Antwort der Befehl wartet, geht an dasselbe
+    # Gerät: an ein anderes gestellt bestätigte sie nichts.
+    assert [frame["dest"] for frame in client.sent] == [ROOF_AC, ROOF_AC], (
+        [f"0x{frame['dest']:04X}" for frame in client.sent]
     )
 
     # ...and the one topic the panel relays keeps going to the panel, however
     # the value reaches us and whichever device the entity sits on.
     asyncio.run(coord.async_write(COMBI, "RoomClimate", "Mode", 3))
-    assert client.sent[-1]["dest"] == PANEL
+    assert client.writes[-1]["dest"] == PANEL
 
 
 def test_a_write_a_device_says_it_will_refuse_is_not_sent() -> None:
     """Refused with the device's own claim quoted, rather than swallowed."""
     coord = _Coord()
-    client = _Client()
+    client = _Client(coord)
     coord._client = client
     _describe(coord, COMBI, "AirCirculation", "FanLevel", v=4, min=0, max=4)
 

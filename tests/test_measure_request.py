@@ -189,6 +189,9 @@ class _Coord:
         self._bus = BUS.Bus()
         self._last_frame = 0.0
         self._stop = False
+        # Kein Rückmeldungsbuch: hier wird nichts geschrieben, und genau
+        # daran erkennt der Frame-Pfad, dass er sich die Buchführung spart.
+        self._write_feedback = {}
         # A session that reaches startup records which address kind carried it;
         # these fixtures dial nothing, so there is nothing to record.
         self._last_kind = None
@@ -213,6 +216,11 @@ class _Coord:
     # coordinator this frame path runs on.
     device_is_named = COORD.TrumaCoordinator.device_is_named
     async_sync_device_names = COORD.TrumaCoordinator.async_sync_device_names
+    # Und seit ein Schreibvorgang auf die Antwort des Geräts wartet: jeder
+    # Frame wird einer wartenden Bestätigung angeboten. Ohne die beiden wäre
+    # dies nicht mehr der Frame-Pfad, auf dem der Coordinator läuft.
+    _note_frame_values = COORD.TrumaCoordinator._note_frame_values
+    on_frame_value = COORD.TrumaCoordinator.on_frame_value
 
 
 class _StartupCoord(_Coord):

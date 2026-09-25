@@ -261,11 +261,19 @@ class TrumaCoordinator(DataUpdateCoordinator[Bus]):
         self._wake_event = asyncio.Event()
         self._connected_event = asyncio.Event()
         self._writes_pending = 0
-        # Werte, die eingetroffen sind, während ein Schreibvorgang auf seine
-        # Bestätigung wartet: (addr, topic, param) -> Wert. None, solange
-        # nichts geschrieben wird -- daran erkennt der Frame-Pfad, dass er
-        # sich die Buchführung sparen kann.
-        self._write_feedback: dict[tuple[int, str, str], int] | None = None
+        # Ein Rückmeldungsbuch je laufendem Schreibvorgang, unter dessen
+        # Vorgangs-Token: Token -> {(addr, topic, param): Wert}. Eines je
+        # Vorgang und nicht eines für alle, weil Home Assistant Service-Aufrufe
+        # nicht serialisiert -- eine Szene, ein `parallel:`-Skript oder schlicht
+        # eine zweite Bedienung innerhalb der bis zu 40 s, die ein Befehl
+        # braucht, lässt zwei Vorgänge gleichzeitig warten. Mit einem
+        # gemeinsamen Buch löschte der zweite dem ersten seine Meldungen weg,
+        # und ein ausgeführter Befehl würde als "did not confirm" gemeldet.
+        # Unter dem Token und nicht in einer Liste, weil zwei noch leere Bücher
+        # gleich sind und ``list.remove`` dann das falsche träfe.
+        # Leer heißt: es wird gerade nicht geschrieben, und der Frame-Pfad
+        # spart sich die Buchführung.
+        self._write_feedback: dict[int, dict[tuple[int, str, str], int]] = {}
         # Loop-Zeitpunkt, bis zu dem nach einem Befehl nicht aufgelegt wird.
         self._command_hold_until = 0.0
 
@@ -1105,7 +1113,7 @@ class TrumaCoordinator(DataUpdateCoordinator[Bus]):
         gerade erwartet wird -- und weil außerhalb eines Schreibvorgangs
         nichts davon getan wird.
         """
-        if self._write_feedback is None:
+        if not self._write_feedback:
             return
         src = parsed.get("src")
         cbor = parsed.get("cbor")
@@ -1134,9 +1142,13 @@ class TrumaCoordinator(DataUpdateCoordinator[Bus]):
         nur eine Meldung, die nach dem Frame eingetroffen ist. Der Bus taugt
         dafür nicht -- der hält auch den Wert von vorher, und ein Befehl, der
         nichts bewirkt, würde sich aus dem Cache selbst bestätigen.
+
+        Jeder laufende Vorgang bekommt denselben Wert in sein eigenes Buch:
+        eine Meldung kann die Antwort auf zwei gleichzeitig wartende Befehle
+        sein, und keiner von beiden darf sie dem anderen wegnehmen.
         """
-        if self._write_feedback is not None:
-            self._write_feedback[(addr, topic, param)] = value
+        for book in self._write_feedback.values():
+            book[(addr, topic, param)] = value
 
     @callback
     def _mark_disconnected(self) -> None:
@@ -1214,18 +1226,26 @@ class TrumaCoordinator(DataUpdateCoordinator[Bus]):
             if not ok:
                 raise HomeAssistantError(f"Invalid Truma command: {msg}")
 
-        with self._operations.operation(action or self._infer_action(commands), target):
+        with self._operations.operation(
+            action or self._infer_action(commands), target
+        ) as token:
             # Über den ganzen Vorgang gehalten, nicht nur über das Warten auf
             # einen Link: im Poll-Betrieb prüft die Schleife das, bevor sie
             # auflegt, und ein früh freigegebenes Flag ließe sie zwischen
             # Client-Holen und Senden auflegen.
             self._writes_pending += 1
-            self._write_feedback = {}
+            # Das eigene Buch dieses Vorgangs. Ein zweiter Vorgang, der
+            # währenddessen anläuft, legt sein eigenes daneben und lässt
+            # dieses unberührt.
+            feedback: dict[tuple[int, str, str], int] = {}
+            self._write_feedback[token] = feedback
             try:
                 client = await self._client_for_write()
                 for addr, topic, param, value in commands:
                     dest = self._bus.command_dest(addr, topic)
-                    await self._write_confirmed(client, dest, topic, param, value)
+                    await self._write_confirmed(
+                        client, dest, topic, param, value, feedback
+                    )
                 if len(commands) > 1:
                     # Jeder einzelne Befehl wurde bestätigt -- was nicht heißt,
                     # dass am Ende alle zugleich gelten. Eine Heizung kann eine
@@ -1243,7 +1263,7 @@ class TrumaCoordinator(DataUpdateCoordinator[Bus]):
                                 f"{topic}.{param}={value}"
                             )
             finally:
-                self._write_feedback = None
+                self._write_feedback.pop(token, None)
                 self._writes_pending -= 1
                 # Auch nach einem Fehlschlag: der Nutzer soll sofort
                 # nachsteuern können, ohne auf den nächsten Poll zu warten.
@@ -1252,16 +1272,26 @@ class TrumaCoordinator(DataUpdateCoordinator[Bus]):
                 )
 
     async def _write_confirmed(
-        self, client: TrumaBleClient, dest: int, topic: str, param: str, value: int
+        self,
+        client: TrumaBleClient,
+        dest: int,
+        topic: str,
+        param: str,
+        value: int,
+        feedback: dict[tuple[int, str, str], int],
     ) -> None:
-        """Einen Parameter schreiben und auf die Bestätigung des Geräts warten."""
+        """Einen Parameter schreiben und auf die Bestätigung des Geräts warten.
+
+        ``feedback`` ist das Buch des eigenen Vorgangs und wird durchgereicht
+        statt über ``self`` geholt: ein gleichzeitiger zweiter Schreibvorgang
+        soll hier nichts anfassen können.
+        """
         for attempt in range(_WRITE_ATTEMPTS):
             # Alles, was vor diesem Anlauf gemeldet wurde, zählt nicht: es kann
             # den Stand von vor dem Befehl tragen, und eine Meldung, die zufällig
             # schon den Wunschwert trug, würde den Befehl bestätigen, ohne dass
             # er je ausgeführt wurde.
-            if self._write_feedback is not None:
-                self._write_feedback.pop((dest, topic, param), None)
+            feedback.pop((dest, topic, param), None)
             frame = build_write_frame(client.assigned_addr, dest, topic, param, value)
             LOGGER.debug("Truma write %s.%s = %s -> 0x%04X", topic, param, value, dest)
             if not await client.send(frame):
@@ -1271,7 +1301,7 @@ class TrumaCoordinator(DataUpdateCoordinator[Bus]):
             # Ein schlafender oder gerade aufwachender Brenner schickt den
             # geänderten Wert nicht von selbst -- also danach fragen.
             await self._request_param_discovery(client, dest)
-            if await self._await_feedback(dest, topic, param, value):
+            if await self._await_feedback(dest, topic, param, value, feedback):
                 return
             if not client.connected or attempt == _WRITE_ATTEMPTS - 1:
                 break
@@ -1279,13 +1309,18 @@ class TrumaCoordinator(DataUpdateCoordinator[Bus]):
         raise HomeAssistantError(f"Truma did not confirm {topic}.{param}={value}")
 
     async def _await_feedback(
-        self, dest: int, topic: str, param: str, value: int
+        self,
+        dest: int,
+        topic: str,
+        param: str,
+        value: int,
+        feedback: dict[tuple[int, str, str], int],
     ) -> bool:
         """Auf eine frische Meldung des Zielgeräts warten."""
         deadline = self.hass.loop.time() + _WRITE_FEEDBACK_TIMEOUT
         while self.hass.loop.time() < deadline:
             await asyncio.sleep(0.2)
-            got = (self._write_feedback or {}).pop((dest, topic, param), None)
+            got = feedback.pop((dest, topic, param), None)
             if got is None:
                 continue
             if self._feedback_satisfied(topic, param, value, got):

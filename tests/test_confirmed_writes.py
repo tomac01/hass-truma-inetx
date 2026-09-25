@@ -18,7 +18,13 @@ Was der Test festnagelt:
 7. ein schlafendes Gerät wird wiederholt, aber begrenzt,
 8. beide Frameformen, die Werte tragen, zählen als Rückmeldung,
 9. eine Mehrfach-Transaktion prüft am Ende den tatsächlichen Endzustand,
-10. ein ungültiger Befehl wird geprüft, bevor irgendetwas gesendet wird.
+10. ein ungültiger Befehl wird geprüft, bevor irgendetwas gesendet wird,
+11. die Rückfrage geht als Sonde hinaus, damit Schweigen die Sitzung nicht
+    abreißt und aus drei Anläufen nicht lautlos einer wird,
+12. der Befehl geht an das Gerät der Entität -- außer bei den Topics, die
+    das Panel weiterreicht (#10),
+13. zwei gleichzeitige Schreibvorgänge räumen sich nicht gegenseitig die
+    Rückmeldung weg.
 
 Run: ``python3 tests/test_confirmed_writes.py``
 """
@@ -122,10 +128,15 @@ class _Client:
         self.aftermath = aftermath
         self.sends: list = []
         self.writes: list = []
+        # Womit jeder Frame gesendet wurde. Ein Double, das ``probe`` nur
+        # entgegennimmt, prüft die Regel nicht -- und sie trägt: ein nicht als
+        # Sonde gesendeter Frame ohne Antwort beendet in ble.py die Sitzung.
+        self.probes: list[tuple] = []
         self._pending: tuple | None = None
 
     async def send(self, frame, probe: bool = False) -> bool:
         self.sends.append(frame)
+        self.probes.append((frame[0], probe))
         if frame[0] == "write":
             _kind, _dest, topic, param, _value = frame
             self.writes.append(frame)
@@ -160,7 +171,7 @@ class _Coord:
         self._bus.connected = True
         self._operations = COORD.OperationRegistry(lambda: None)
         self._writes_pending = 0
-        self._write_feedback = None
+        self._write_feedback = {}
         self._command_hold_until = 0.0
         self._last_frame = 0.0
         self._wake_event = asyncio.Event()
@@ -238,7 +249,7 @@ def test_transport_ack_alone_is_not_confirmation() -> None:
 
     assert coord._client.writes, "es wurde gar nicht erst geschrieben"
     assert coord._writes_pending == 0
-    assert coord._write_feedback is None
+    assert coord._write_feedback == {}, coord._write_feedback
     # Auch ein Fehlschlag hält den Link für die nächste Bedienung offen.
     assert coord._command_hold_until == coord.clock.now + COORD._COMMAND_HOLD_SECONDS
 
@@ -420,6 +431,137 @@ def test_the_failed_operation_is_named_for_what_the_user_did() -> None:
         raise AssertionError("kein Fehlschlag")
     assert coord._operations.attributes["action"] == "energy_source"
     assert coord._operations.attributes["target"] == "gas+electric"
+
+
+def test_the_parameter_query_is_sent_as_a_probe() -> None:
+    """Die Abfrage darf unbeantwortet bleiben, ohne die Sitzung zu beenden.
+
+    ``ble.py`` beendet im ``finally`` von ``_send_locked`` jede Sitzung, deren
+    Frame nicht beantwortet wurde -- außer der Frame war als Sonde markiert.
+    Genau ein schlafendes Gerät ist der Fall, für den ``_write_confirmed``
+    überhaupt mehrere Anläufe hat: ginge die Abfrage ohne ``probe=True``
+    hinaus, risse ihr Schweigen die Sitzung ab, ``if not client.connected``
+    bräche ab, und aus drei Anläufen würde lautlos einer.
+    """
+    coord = _Coord({("EnergySrc", "ElectricLevel"): 1})
+    _describe(coord, "EnergySrc", "ElectricLevel")
+    asyncio.run(coord.async_write(HEATER, "EnergySrc", "ElectricLevel", 1))
+
+    assert coord._client.probes == [("write", False), ("discovery", True)], (
+        coord._client.probes
+    )
+
+
+def test_a_relayed_topic_is_addressed_to_the_panel() -> None:
+    """Die Zieladressierung von #10, auf dem bestätigten Schreibpfad.
+
+    Der Befehl geht an das Gerät der Entität -- außer bei den Topics, die das
+    Panel für den Bus weiterreicht. Dann ist auch das Panel die Quelle, die
+    bestätigen darf: eine Antwort der Heizung wäre keine Antwort auf diesen
+    Frame.
+    """
+    coord = _Coord({("RoomClimate", "Mode"): 3}, source=PANEL)
+    _describe(coord, "RoomClimate", "Mode", addr=PANEL, enum={0: "off", 3: "heat"})
+
+    asyncio.run(coord.async_write(HEATER, "RoomClimate", "Mode", 3))
+
+    assert [frame[1] for frame in coord._client.writes] == [PANEL], (
+        coord._client.writes
+    )
+    # ...und der nicht weitergereichte Nachbar geht weiter ans eigene Gerät.
+    coord = _Coord({("AirCirculation", "FanLevel"): 3})
+    _describe(coord, "AirCirculation", "FanLevel")
+    asyncio.run(coord.async_write(HEATER, "AirCirculation", "FanLevel", 3))
+    assert [frame[1] for frame in coord._client.writes] == [HEATER], (
+        coord._client.writes
+    )
+
+
+class _SlowPanel:
+    """Ein Panel, das erst meldet, wenn der Test es sagt.
+
+    Anders als ``_Client`` merkt es sich mehrere offene Schreibvorgänge und
+    beantwortet sie nicht schon in der Parameter-Abfrage: nur so lässt sich
+    der Zeitpunkt festlegen, an dem die Meldung eintrifft, und genau darauf
+    kommt es hier an.
+    """
+
+    connected = True
+    assigned_addr = 0x0500
+
+    def __init__(self, coordinator) -> None:
+        self.coordinator = coordinator
+        self.writes: list = []
+        self._pending: list = []
+
+    async def send(self, frame, probe: bool = False) -> bool:
+        if frame[0] == "write":
+            _kind, _dest, topic, param, value = frame
+            self.writes.append(frame)
+            self._pending.append((topic, param, value))
+        return True
+
+    def answer(self) -> None:
+        """Alles melden, was angenommen wurde -- so wie ein Gerät aufwacht."""
+        pending, self._pending = self._pending, []
+        for topic, param, value in pending:
+            self.coordinator.report(_discovery_response(HEATER, topic, param, value))
+
+
+async def _until(condition, what: str) -> None:
+    """Die anderen Tasks laufen lassen, bis ``condition`` gilt."""
+    for _ in range(50):
+        if condition():
+            return
+        await asyncio.sleep(0)
+    raise AssertionError(f"kam nie so weit: {what}")
+
+
+def test_two_writes_at_once_do_not_erase_each_other() -> None:
+    """Zwei gleichzeitige Befehle führen nicht dazu, dass einer scheitert.
+
+    Home Assistant serialisiert Service-Aufrufe nicht: eine Szene, ein
+    ``parallel:``-Skript, zwei Automationen oder schlicht eine zweite
+    Bedienung innerhalb der bis zu 40 s, die ein Befehl jetzt dauern darf,
+    lassen zwei Schreibvorgänge zugleich auf ihre Bestätigung warten. Mit
+    einem gemeinsamen Rückmeldungsbuch räumte der später gestartete dem
+    früheren seines weg -- der erste lief in den Timeout und meldete "did not
+    confirm" für einen Befehl, den das Gerät ausgeführt und zurückgemeldet
+    hatte. Also genau die Fehlklasse, die dieser Schreibpfad beseitigen soll,
+    nur spiegelverkehrt.
+
+    Der Reihenfolge nach gestellt, weil erst sie den Fall trifft: das Gerät
+    meldet, *nachdem* der zweite Vorgang begonnen hat. Ein Buch, das der
+    zweite dem ersten weggeräumt hat, nimmt diese Meldung nicht mehr an.
+    """
+    coord = _Coord({})
+    panel = _SlowPanel(coord)
+    coord._client = panel
+    _describe(coord, "EnergySrc", "ElectricLevel")
+    _describe(coord, "WaterHeating", "Mode")
+
+    async def _both() -> None:
+        first = asyncio.create_task(
+            coord.async_write(HEATER, "EnergySrc", "ElectricLevel", 1)
+        )
+        await _until(lambda: len(panel.writes) == 1, "erster Befehl gesendet")
+        second = asyncio.create_task(
+            coord.async_write(HEATER, "WaterHeating", "Mode", 2)
+        )
+        await _until(lambda: len(panel.writes) == 2, "zweiter Befehl gesendet")
+        # Beide warten jetzt; erst hier meldet das Gerät.
+        panel.answer()
+        await asyncio.gather(first, second)
+
+    asyncio.run(_both())
+
+    # Je ein Frame: keiner der beiden musste einen Anlauf wiederholen, also
+    # ging auch keiner der beiden Befehle ein zweites Mal ans Fahrzeug.
+    assert len(panel.writes) == 2, panel.writes
+    assert coord._bus.device(HEATER).get("EnergySrc", "ElectricLevel") == 1
+    assert coord._bus.device(HEATER).get("WaterHeating", "Mode") == 2
+    assert coord._write_feedback == {}, coord._write_feedback
+    assert coord._writes_pending == 0
 
 
 def _main() -> None:

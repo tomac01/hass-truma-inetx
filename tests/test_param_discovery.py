@@ -131,6 +131,9 @@ class _Coord:
     def __init__(self) -> None:
         self._bus = BUS.Bus()
         self._last_frame = 0.0
+        # Kein Rückmeldungsbuch: hier wird nichts geschrieben, und genau
+        # daran erkennt der Frame-Pfad, dass er sich die Buchführung spart.
+        self._write_feedback = {}
         self._identity = {
             "muid": "MUID",
             "uuid": "uuid",
@@ -142,6 +145,11 @@ class _Coord:
 
     _run_startup = COORD.TrumaCoordinator._run_startup
     _on_frame = COORD.TrumaCoordinator._on_frame
+    # Seit ein Schreibvorgang auf die Antwort des Geräts wartet, bietet der
+    # Frame-Pfad jeden Wert einer wartenden Bestätigung an. Ohne die beiden
+    # wäre dies nicht mehr der Pfad, auf dem der Coordinator läuft.
+    _note_frame_values = COORD.TrumaCoordinator._note_frame_values
+    on_frame_value = COORD.TrumaCoordinator.on_frame_value
     # Startup ends by asking the on-demand sensors to measure. Nothing here
     # reports a tank, so it sends nothing -- which is the point: this file is
     # about discovery, and tests/test_measure_request.py owns that step.
