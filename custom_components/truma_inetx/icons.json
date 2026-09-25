@@ -9,6 +9,9 @@
       },
       "needs_energy": {
         "default": "mdi:lightning-bolt-outline"
+      },
+      "proxy_connection": {
+        "default": "mdi:bluetooth-transfer"
       }
     },
     "button": {

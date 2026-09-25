@@ -152,7 +152,8 @@ def _load():
     )
     # Without this, is_remote_scanner() hits ImportError and calls every scanner
     # local, which would silently pass the proxy-preference checks below.
-    _mod("habluetooth", BaseHaRemoteScanner=_RemoteScanner)
+    _mod("habluetooth", BaseHaRemoteScanner=_RemoteScanner,
+         get_manager=lambda: None)
 
     _mod("truma_pkg", __path__=[str(SRC)])
     _mod("truma_pkg.truma", __path__=[])

@@ -44,7 +44,7 @@
   "entity": {
     "binary_sensor": {
       "connection": {
-        "name": "BLE connection"
+        "name": "BLE Truma connection"
       },
       "cooling_active": {
         "name": "Cooling"
@@ -66,6 +66,9 @@
       },
       "needs_energy": {
         "name": "Requesting energy"
+      },
+      "proxy_connection": {
+        "name": "BLE transmitter connection"
       }
     },
     "button": {

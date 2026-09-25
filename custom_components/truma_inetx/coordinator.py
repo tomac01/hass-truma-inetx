@@ -27,6 +27,7 @@ from .bt import (
     ADDR_IDENTITY,
     address_kind,
     async_panel_advertising,
+    async_remote_scanner_source,
     async_resolve_device,
     async_wait_until_heard,
 )
@@ -40,6 +41,7 @@ from .const import (
     MODEL,
     NO_ROUTE_MISSES_BEFORE_WARNING,
 )
+from .proxy import TrumaProxyTracker
 from .truma.const import DEV_BLE_MGMT, DEV_PANEL
 from .truma.protocol import build_write_frame
 
@@ -168,6 +170,13 @@ class TrumaCoordinator(DataUpdateCoordinator[Bus]):
         # Home Assistant too old to want it.
         self.hub_device_id: str | None = None
         self._bus = Bus()
+        self._proxy_tracker = TrumaProxyTracker(self._async_proxy_changed)
+        entry.async_on_unload(self._proxy_tracker.async_setup())
+        # Der tatsächliche BLE-Sitzungszustand. ``bus.connected`` bleibt im
+        # Poll-Betrieb zwischen den Polls bewusst true, damit gecachte
+        # Bedienelemente verfügbar bleiben; dieses Flag ist das, was der
+        # Panel-Link-Sensor stattdessen meldet.
+        self._panel_link_connected = False
         self._client: TrumaBleClient | None = None
         self._session_task: asyncio.Task[None] | None = None
         self._identity: dict | None = None
@@ -226,6 +235,35 @@ class TrumaCoordinator(DataUpdateCoordinator[Bus]):
     async def _async_update_data(self) -> Bus:
         """Return the shared bus (updated by BLE notifications)."""
         return self._bus
+
+    @property
+    def proxy_available(self) -> bool | None:
+        """Ob der für dieses Panel benutzte ESPHome-Proxy registriert ist."""
+        return self._proxy_tracker.available
+
+    @property
+    def panel_link_connected(self) -> bool:
+        """Ob gerade eine physische BLE-Sitzung zum Panel offen ist."""
+        return self._panel_link_connected
+
+    @callback
+    def _set_panel_link_connected(self, connected: bool) -> None:
+        """Einen echten Link-Wechsel an Entitäten und Logbuch veröffentlichen."""
+        if self._panel_link_connected == connected:
+            return
+        self._panel_link_connected = connected
+        self.async_set_updated_data(self._bus)
+
+    @callback
+    def _async_proxy_changed(self) -> None:
+        """Geänderte Proxy-Registrierung an die Entitäten geben."""
+        self.async_set_updated_data(self._bus)
+
+    @callback
+    def _remember_proxy_for_address(self, address: str) -> None:
+        """Den entfernten Scanner merken, der diese Panel-Route geliefert hat."""
+        if source := async_remote_scanner_source(self.hass, address):
+            self._proxy_tracker.remember_source(source)
 
     def _async_note_no_route(self) -> None:
         """Warn the user when the panel is audible but nothing can connect.
@@ -384,12 +422,17 @@ class TrumaCoordinator(DataUpdateCoordinator[Bus]):
         self._client = None
         if client is None:
             LOGGER.debug("Truma %s: no live BLE link to close", self.unique_id)
+            self._set_panel_link_connected(False)
             return
         try:
             await client.disconnect()
             LOGGER.debug("Truma %s: BLE link closed cleanly", self.unique_id)
         except Exception as exc:  # noqa: BLE001 - teardown must not raise
             LOGGER.debug("Truma %s disconnect: %s", self.unique_id, exc)
+        finally:
+            # Auch ein gescheiterter Disconnect lässt keinen Link zurück,
+            # den wir noch melden dürften.
+            self._set_panel_link_connected(False)
 
     async def _load_stored_state(self) -> None:
         """Load the persisted app identity and address-kind memory.
@@ -578,6 +621,7 @@ class TrumaCoordinator(DataUpdateCoordinator[Bus]):
                 # connects on.
                 self._last_kind = None
                 await client.adopt(initial)
+                self._set_panel_link_connected(True)
                 return await self._finish_startup(client)
             # Handed-off link dropped in the setup gap — discard and connect
             # fresh below.
@@ -631,6 +675,7 @@ class TrumaCoordinator(DataUpdateCoordinator[Bus]):
         self._async_clear_no_route()
         self._last_addr = ble_device.address
         self._last_kind = address_kind(self.unique_id, ble_device.address)
+        self._remember_proxy_for_address(ble_device.address)
         # Dial while the panel is still audible: the resolved address is only
         # good for as long as the host's cache of it is (see
         # bt.async_wait_until_heard). A stale dial costs a ~20 s timeout during
@@ -646,6 +691,7 @@ class TrumaCoordinator(DataUpdateCoordinator[Bus]):
                 "Truma %s: connecting without a fresh advert", self.unique_id
             )
         await client.connect(ble_device)
+        self._set_panel_link_connected(True)
         # The connection established, so this address is not the phantom —
         # clear the blame marker so a later failure (startup, a mid-session
         # drop) does not wrongly banish a perfectly good address.

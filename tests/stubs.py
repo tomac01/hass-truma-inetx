@@ -319,6 +319,20 @@ async def _no_link_to_close(_client, _label) -> None:
     """Stand-in for ble.close_link: closing a stub link is a no-op."""
 
 
+class _FakeProxyTracker:
+    """Stand-in for proxy.TrumaProxyTracker without habluetooth behind it."""
+
+    def __init__(self, _async_on_change) -> None:
+        self.source: str | None = None
+        self.available: bool | None = None
+
+    def async_setup(self):
+        return lambda: None
+
+    def remember_source(self, source: str) -> None:
+        self.source = source
+
+
 def stub_transport() -> None:
     """Stub the BLE transport modules, for tests that are not about it."""
     mod("truma_pkg.ble", TrumaBleClient=object, device_from_bluez=None,
@@ -326,7 +340,11 @@ def stub_transport() -> None:
     mod("truma_pkg.bt", async_panel_advertising=lambda *a: False,
         async_resolve_device=None, async_wait_until_heard=None,
         ADDR_IDENTITY="identity", ADDR_RPA="rpa",
-        address_kind=lambda _name, _address: "rpa")
+        address_kind=lambda _name, _address: "rpa",
+        async_remote_scanner_source=lambda _hass, _address: None)
+    # Der Proxy-Tracker greift im Konstruktor auf habluetooth zu; wer die
+    # Transportschicht stubbt, will genau das nicht mitschleppen.
+    mod("truma_pkg.proxy", TrumaProxyTracker=_FakeProxyTracker)
 
 
 class FakeCoordinator:

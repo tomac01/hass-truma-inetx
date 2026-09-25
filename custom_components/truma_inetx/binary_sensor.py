@@ -27,10 +27,12 @@ async def async_setup_entry(
 ) -> None:
     """Set up Truma binary sensors."""
     coordinator = entry.runtime_data
-    # The link is not a bus parameter and cannot wait for one: it is what says
-    # whether anything on the bus can be heard at all, so it exists from setup
-    # and reports the panel, which is the thing we are connected to.
-    async_add_entities([TrumaConnectionSensor(coordinator)])
+    # Neither is a bus parameter and neither can wait for one: they are what
+    # says whether anything on the bus can be heard at all, so they exist from
+    # setup and report the panel, which is the thing we are connected to. Two
+    # questions, two sensors -- the open BLE session to the panel, and the
+    # Bluetooth proxy that carries it.
+    async_add_entities([TrumaConnectionSensor(coordinator), TrumaProxySensor(coordinator)])
     async_add_rows(
         coordinator,
         async_add_entities,
@@ -93,5 +95,23 @@ class TrumaConnectionSensor(TrumaEntity, BinarySensorEntity):
 
     @property
     def is_on(self) -> bool:
-        """Whether the BLE link to the panel is up."""
-        return self.bus.connected
+        """Ob gerade eine BLE-Sitzung zum Panel offen ist."""
+        return self.coordinator.panel_link_connected
+
+
+class TrumaProxySensor(TrumaEntity, BinarySensorEntity):
+    """Verfügbarkeit des für dieses Panel benutzten ESPHome-Proxys."""
+
+    _attr_translation_key = "proxy_connection"
+    _attr_device_class = BinarySensorDeviceClass.CONNECTIVITY
+    _attr_entity_category = None
+    _gate_on_connected = False
+
+    def __init__(self, coordinator: TrumaCoordinator) -> None:
+        """Initialisieren."""
+        super().__init__(coordinator, DEV_PANEL, "proxy_connection")
+
+    @property
+    def is_on(self) -> bool | None:
+        """Ob der identifizierte Bluetooth-Proxy in HA registriert ist."""
+        return self.coordinator.proxy_available

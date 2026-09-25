@@ -126,8 +126,8 @@ def test_gas_is_reflected_and_never_commanded() -> None:
 def test_the_gas_sensor_appears_only_on_a_heater_that_burns_gas() -> None:
     coordinator = _coordinator()
     made = stubs.setup_platform(BINARY, coordinator)
-    # The link sensor is not a bus parameter and cannot wait for one.
-    assert _keys(made) == ["connection"], made
+    # Neither link sensor is a bus parameter, and neither may wait for one.
+    assert _keys(made) == ["connection", "proxy_connection"], made
 
     coordinator.report("EnergySrc", "GasLevel", 1, HEATER)
     assert _keys(made)[-1] == "gas", made
@@ -136,7 +136,7 @@ def test_the_gas_sensor_appears_only_on_a_heater_that_burns_gas() -> None:
 
     # ...and only once, however many frames follow.
     coordinator.report("EnergySrc", "GasLevel", 0, HEATER)
-    assert len(made) == 2, made
+    assert len(made) == 3, made
     assert made[-1].is_on is False
 
 
