@@ -271,9 +271,11 @@ def async_sweep_for_names_soon(hass: HomeAssistant) -> None:
 def is_remote_scanner(scanner: object) -> bool:
     """Return True for a remote (e.g. ESP32 proxy) scanner, not a local adapter.
 
-    Only ``local_only`` below has any business calling this. Nothing else may
-    branch on the kind of scanner an advert came from: the scanner that heard
-    the panel is not the adapter that will carry the connection.
+    Nothing may branch on the kind of scanner an advert came from in order to
+    *choose* a route: the scanner that heard the panel is not the adapter that
+    will carry the connection. ``local_only`` below is the one data
+    requirement. ``async_has_proxy_route`` and ``async_remote_scanner_source``
+    only ask and report -- neither picks anything.
     """
     try:
         from habluetooth import BaseHaRemoteScanner
@@ -533,3 +535,21 @@ async def async_wait_until_heard(
             )
             return False
         await asyncio.sleep(0.25)
+
+
+def async_remote_scanner_source(hass: HomeAssistant, address: str) -> str | None:
+    """The source of the remote scanner that can reach ``address``.
+
+    The source names the concrete ESPHome Bluetooth proxy inside
+    ``habluetooth``. Keeping it apart from the panel link lets a healthy proxy
+    be reported while the panel is deliberately disconnected between two polls.
+
+    This is a report, not a route choice: which adapter carries the next
+    connection stays Home Assistant's decision -- see the module docstring.
+    """
+    for scanner_device in bluetooth.async_scanner_devices_by_address(
+        hass, address, connectable=True
+    ):
+        if is_remote_scanner(scanner_device.scanner):
+            return scanner_device.scanner.source
+    return None
