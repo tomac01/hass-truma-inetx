@@ -141,6 +141,9 @@ class _Coord:
         # Vorgangs-Sensor landet, und die Haltezeit nach einem Befehl.
         self._operations = COORD.OperationRegistry(lambda: None)
         self._command_hold_until = 0.0
+        # Der Nachlauf nach einem Befehl wird seit Task 7/8 in async_write_many
+        # gesetzt. Die echte Methode ziehen statt sie zu stubben: so faellt hier
+        # auf, wenn sich ihre Wirkung aendert.
 
     @property
     def data(self):
@@ -163,6 +166,7 @@ class _Coord:
     # Der ganze Schreibpfad, nicht nur sein Eingang: ``async_write`` ist seit
     # der Schreibbestätigung nur noch eine Weiterleitung, und die Adressierung
     # von #10 entscheidet sich eine Ebene tiefer.
+    _hold_after_command = COORD.TrumaCoordinator._hold_after_command
     async_write = COORD.TrumaCoordinator.async_write
     async_write_many = COORD.TrumaCoordinator.async_write_many
     _write_confirmed = COORD.TrumaCoordinator._write_confirmed

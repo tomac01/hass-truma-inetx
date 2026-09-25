@@ -197,6 +197,14 @@ class _Coord:
         self._last_kind = None
         self._session_ok = False
         self._writes_pending = 0
+        # Live-Modus-Felder aus Task 9: _finish_startup liest sie, dieser Test
+        # geht sie nie an. Ruhezustand, damit die Poll-Schleife sich normal verhaelt.
+        self._manual_hold_request_minutes = None
+        self._manual_wake_pending = False
+        self._manual_release_requested = False
+        self._manual_hold_until = 0.0
+        self._manual_requests = {}
+        self._command_hold_until = 0.0
         self._connected_event = asyncio.Event()
         self._identity = {
             "muid": "MUID", "uuid": "uuid", "username": "Home Assistant",
@@ -209,6 +217,7 @@ class _Coord:
         """Stand in for registration + discovery, which have their own file."""
 
     _request_measurements = COORD.TrumaCoordinator._request_measurements
+    manual_session_active = COORD.TrumaCoordinator.manual_session_active
     _finish_startup = COORD.TrumaCoordinator._finish_startup
     _on_frame = COORD.TrumaCoordinator._on_frame
     # Borrowed too: _on_frame reconciles device names on every frame
