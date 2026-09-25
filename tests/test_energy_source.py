@@ -22,7 +22,10 @@ Was der Test festnagelt:
    (zweimal hieße doppelte unique_id),
 8. sie wartet auf den Namen ihres Geräts (#23),
 9. der Upstream-Diesel-Schalter bleibt erhalten -- er ist die einzige
-   Möglichkeit, den Brenner einzeln zu schalten.
+   Möglichkeit, den Brenner einzeln zu schalten,
+10. sie entsteht einmal für den ganzen Bus, am ersten Gerät, das beide Pegel
+    meldete -- die Eigenschaft von ``addr=None``, festgehalten, damit ein Bus
+    mit zwei Publishern hier auffällt und nicht am Fahrzeug.
 
 Run: ``python3 tests/test_energy_source.py``
 """
@@ -37,6 +40,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import stubs  # noqa: E402
 
 HEATER = 0x0201
+# Das Panel wird als erstes Gerät auf dem Bus entdeckt. Es meldet ``EnergySrc``
+# auf keinem belegten Fahrzeug -- in test_one_select_for_the_whole_bus ist es
+# der erfundene zweite Publisher, der zeigt, was dann passierte.
+PANEL = 0x0101
 
 # Die drei Quellen, in der Reihenfolge, in der Home Assistant sie anbietet.
 # Bewusst als Literale und nicht aus dem Modul geholt: das sind die
@@ -238,6 +245,44 @@ def test_the_select_is_created_exactly_once() -> None:
     assert select.unique_id == f"{coordinator.unique_id}_0201_energy_source", (
         select.unique_id
     )
+
+
+def test_one_select_for_the_whole_bus() -> None:
+    """Zwei Publisher, eine Auswahl -- am ersten, der beide Pegel meldete.
+
+    Das ist keine gemessene Lage, sondern die Eigenschaft von ``addr=None``,
+    hier ausgeschrieben, damit sie nicht erst am Fahrzeug auffällt: die
+    Auswahl entsteht einmal für den ganzen Bus, an dem Gerät, das in der
+    Einfügereihenfolge von ``devices`` zuerst beide Pegel führte -- und sie
+    schreibt danach auch dorthin. Ein zweites Gerät mit denselben Pegeln
+    bekäme still keine eigene.
+
+    Belegt ist das Gegenteil: ``EnergySrc`` kommt in
+    ``dumps/combi4-inetx-pro/`` allein von 0x0201, und relayed wird ans Panel
+    nur ``RoomClimate`` (``bus.COMMAND_DEST``). Taucht je ein Bus auf, auf dem
+    zwei Geräte beide Pegel melden, schlägt dieser Test fehl -- dann braucht
+    ``select.py`` eine echte Adresse statt ``None`` und eine Auswahl pro
+    Gerät.
+    """
+    coordinator = _Coordinator(BUS.Bus())
+    made = stubs.setup_platform(SELECT, coordinator)
+
+    # Das Panel ist zuerst da und meldet -- hypothetisch -- beide Pegel.
+    coordinator.describe("EnergySrc", "DieselLevel", PANEL, perm=1, v=1)
+    coordinator.describe("EnergySrc", "ElectricLevel", PANEL, perm=1, v=0)
+    _both_reported(coordinator)
+
+    assert _count(made, "TrumaEnergySourceSelect") == 1, [
+        e.unique_id for e in made if type(e).__name__ == "TrumaEnergySourceSelect"
+    ]
+    select = _by_class(made, "TrumaEnergySourceSelect")
+    assert select.unique_id == f"{coordinator.unique_id}_0101_energy_source", (
+        select.unique_id
+    )
+
+    # Und sie schreibt an das Gerät, an dem sie hängt: genau das ist der Preis.
+    commands, _, _ = _selected(coordinator, made, "diesel")
+    assert {addr for addr, *_rest in commands} == {PANEL}, commands
 
 
 def test_it_waits_for_the_device_to_be_named() -> None:

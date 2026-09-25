@@ -68,6 +68,13 @@ async def async_setup_entry(
             coordinator, addr, topic, param, row
         ),
     )
+    # ``None`` statt einer Adresse: welches Gerät die Energiepegel führt, ist
+    # nicht vorab bekannt, und eine Adresstabelle wäre nach dem nächsten
+    # Neupaaren falsch (siehe ``bus.COMMAND_DEST``). Der Preis dafür steht im
+    # Docstring von ``async_add_when_all_reported``: genau eine Auswahl für den
+    # ganzen Bus, am ersten Gerät, das beide Pegel gemeldet hat. Belegt ist nur
+    # ein Publisher -- ``EnergySrc`` kommt in ``dumps/combi4-inetx-pro/``
+    # allein von 0x0201 -- und ans Panel relayed wird nur ``RoomClimate``.
     async_add_when_all_reported(
         coordinator,
         async_add_entities,

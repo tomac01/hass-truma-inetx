@@ -234,6 +234,25 @@ def async_add_when_all_reported(
 
     Es entsteht genau eine Entität und danach nie wieder eine: zwei hätten
     dieselbe unique_id, und Home Assistant nähme die zweite schlicht nicht an.
+
+    Das ist bei ``addr=None`` bewusst eine Entität für den **ganzen Bus**, und
+    das hat zwei Konsequenzen, die hier stehen sollen, statt später gesucht zu
+    werden:
+
+    * Welches Gerät sie bekommt, entscheidet die Einfügereihenfolge von
+      ``coordinator.data.devices`` -- also wer zuerst gesehen wurde, nicht wer
+      fachlich zuständig ist. Das Panel (0x0101) wird früh entdeckt.
+    * Ein **zweites** Gerät, das dieselben Parameter meldet, bekommt still
+      keine eigene Entität; sie hängt weiter am ersten.
+
+    Für die belegten Fahrzeuge ist beides folgenlos: ``EnergySrc`` kommt in
+    ``dumps/combi4-inetx-pro/`` ausschließlich von 0x0201, es steht nicht in
+    ``bus.COMMAND_DEST`` (nur ``RoomClimate`` wird ans Panel relayed), und ein
+    zweites Heizgerät ist auf keinem der gemeldeten Busse aufgetaucht. Ein Bus
+    mit zwei Heizgeräten bräuchte statt ``None`` eine echte Adresse -- und
+    zwar pro Gerät eine Entität, nicht eine pro Bus.
+    ``tests/test_energy_source.py`` nagelt beide Konsequenzen fest, damit ein
+    solcher Bus als Testfehlschlag auffällt und nicht als Fehlbedienung.
     """
     made = False
 
