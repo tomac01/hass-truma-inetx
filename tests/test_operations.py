@@ -12,7 +12,8 @@ Was der Test festnagelt:
 1. ein laufender Befehl hat Vorrang vor einem laufenden Sync,
 2. ein Befehlsfehler überlebt nachfolgende erfolgreiche Syncs,
 3. nur ein neuerer Befehl kann ein Befehlsergebnis ablösen,
-4. Abbruch ist ein Ergebnis, kein Verschwinden.
+4. ein älterer Befehl, der später endet, löst es nicht ab,
+5. Abbruch ist ein Ergebnis, kein Verschwinden.
 
 Run: ``python3 tests/test_operations.py``
 """
@@ -67,6 +68,43 @@ def test_a_newer_command_clears_the_older_error() -> None:
 
     reg.end(reg.begin("water_mode", "Eco (40 °C)"))
     assert reg.state == "idle"
+    assert reg.attributes == {"action": None, "target": None, "error": None}
+
+
+def test_an_older_command_that_ends_later_does_not_win() -> None:
+    """Zwei Befehle, die außer der Reihe enden: der neuere bleibt stehen.
+
+    Der Lastfall ist eine Energie-Transaktion, die auf ihre Bestätigung
+    wartet, während der Nutzer daneben die Wassertemperatur stellt. Endet
+    der ältere Vorgang später, darf sein Ergebnis das des neueren nicht
+    überschreiben — sonst meldet das Dashboard "Bereit", obwohl der zuletzt
+    gegebene Befehl gescheitert ist. Ohne den Serienvergleich in ``end``
+    wäre das genau der Fall, und die übrigen Prüfungen hier merken es
+    nicht: keine andere lässt zwei Befehle außer der Reihe enden.
+    """
+    reg = _registry()
+    older = reg.begin("energy_source", "hybrid")
+    newer = reg.begin("water_mode", "Eco (40 °C)")
+
+    reg.end(newer, "Truma did not confirm WaterHeating.Mode=eco")
+    reg.end(older)
+
+    assert reg.state == "error", "der ältere Erfolg räumte den neueren Fehler weg"
+    assert reg.attributes == {
+        "action": "water_mode",
+        "target": "Eco (40 °C)",
+        "error": "Truma did not confirm WaterHeating.Mode=eco",
+    }
+
+    # Und andersherum: der ältere Fehler verdrängt den neueren Erfolg nicht.
+    reg = _registry()
+    older = reg.begin("energy_source", "hybrid")
+    newer = reg.begin("water_mode", "Eco (40 °C)")
+
+    reg.end(newer)
+    reg.end(older, "Truma did not confirm EnergySrc.ElectricLevel=1")
+
+    assert reg.state == "idle", "ein überholter Befehl meldete seinen Fehler nach"
     assert reg.attributes == {"action": None, "target": None, "error": None}
 
 
