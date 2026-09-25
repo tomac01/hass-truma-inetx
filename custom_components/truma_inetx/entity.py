@@ -211,3 +211,51 @@ def async_add_per_device(
     _check()
     unsub = coordinator.async_add_listener(_check)
     coordinator.config_entry.async_on_unload(unsub)
+
+
+@callback
+def async_add_when_all_reported(
+    coordinator: TrumaCoordinator,
+    async_add_entities: Callable[[list[Entity]], None],
+    addr: int | None,
+    required: set[tuple[str, str]],
+    factory: Callable[[int], Entity],
+) -> None:
+    """Eine Entität anlegen, sobald ein Gerät alle geforderten Parameter meldet.
+
+    Anders als ``async_add_rows`` hängt sie nicht an einem einzelnen Parameter:
+    eine Auswahl, die zwei Pegel gemeinsam schreibt, ergibt erst Sinn, wenn
+    beide Hardwareteile da sind. Ein Fahrzeug ohne Elektroelement meldet
+    ``EnergySrc.ElectricLevel`` nie -- es bekommt dann auch keine
+    Hybridauswahl, statt eine zu bekommen, deren Hälfte ins Leere schreibt.
+
+    ``addr`` ist ``None``, wenn es gleich ist, welches Gerät die Parameter
+    führt; dann gewinnt das erste, das alle meldet.
+
+    Es entsteht genau eine Entität und danach nie wieder eine: zwei hätten
+    dieselbe unique_id, und Home Assistant nähme die zweite schlicht nicht an.
+    """
+    made = False
+
+    @callback
+    def _check() -> None:
+        nonlocal made
+        if made:
+            return
+        for candidate, device in list(coordinator.data.devices.items()):
+            if addr is not None and candidate != addr:
+                continue
+            if not all(device.reports(topic, param) for topic, param in required):
+                continue
+            # Dieselbe Wartezeit wie in ``async_add_rows``: Home Assistant
+            # prägt die entity_id aus dem Gerätenamen und revidiert sie nie.
+            if not coordinator.device_is_named(candidate):
+                continue
+            made = True
+            async_add_entities([factory(candidate)])
+            return
+
+    _check()
+    if not made:
+        unsub = coordinator.async_add_listener(_check)
+        coordinator.config_entry.async_on_unload(unsub)

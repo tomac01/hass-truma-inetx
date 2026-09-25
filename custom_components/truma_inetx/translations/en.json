@@ -109,6 +109,15 @@
       "electric_level": {
         "name": "Electric heating"
       },
+      "energy_source": {
+        "name": "Energy source",
+        "state": {
+          "diesel": "Diesel",
+          "electric": "Electric",
+          "hybrid": "Hybrid",
+          "changing": "Changing …"
+        }
+      },
       "water_mode": {
         "name": "Water heating"
       }

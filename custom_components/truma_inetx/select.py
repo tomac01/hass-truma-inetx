@@ -5,10 +5,16 @@ from __future__ import annotations
 from homeassistant.components.select import SelectEntity
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from .coordinator import TrumaConfigEntry, TrumaCoordinator
-from .entity import TrumaParamEntity, async_add_rows
+from .entity import (
+    TrumaEntity,
+    TrumaParamEntity,
+    async_add_rows,
+    async_add_when_all_reported,
+)
 from .profiles import Row
 
 # Entities are coordinator-driven and have no update() method, so Home
@@ -16,6 +22,28 @@ from .profiles import Row
 PARALLEL_UPDATES = 0
 
 OFF = "off"
+
+ENERGY_DIESEL = "diesel"
+ENERGY_ELECTRIC = "electric"
+ENERGY_HYBRID = "hybrid"
+ENERGY_OPTIONS = [ENERGY_DIESEL, ENERGY_ELECTRIC, ENERGY_HYBRID]
+ENERGY_CHANGING = "changing"
+
+# Eintritt in Elektro oder Hybrid immer bei 900 W: 1800 W wirft an schwachen
+# Landanschlüssen den Automaten. Die höhere Stufe bleibt ein bewusster
+# zweiter Schritt über die Leistungsauswahl.
+_ENTER_ELECTRIC = 1
+
+# Beide Pegel müssen gemeldet sein, sonst gibt es die Auswahl nicht: eine
+# Combi D ohne Elektroelement beschreibt EnergySrc.ElectricLevel gar nicht.
+_REQUIRED = {("EnergySrc", "DieselLevel"), ("EnergySrc", "ElectricLevel")}
+
+# Was jede Auswahl in die beiden Hardwarepegel übersetzt.
+_ENERGY_WRITES = {
+    ENERGY_DIESEL: (1, 0),
+    ENERGY_ELECTRIC: (0, _ENTER_ELECTRIC),
+    ENERGY_HYBRID: (1, _ENTER_ELECTRIC),
+}
 
 
 async def async_setup_entry(
@@ -39,6 +67,13 @@ async def async_setup_entry(
         lambda addr, topic, param, row: TrumaSelect(
             coordinator, addr, topic, param, row
         ),
+    )
+    async_add_when_all_reported(
+        coordinator,
+        async_add_entities,
+        None,
+        _REQUIRED,
+        lambda addr: TrumaEnergySourceSelect(coordinator, addr),
     )
 
 
@@ -124,3 +159,74 @@ class TrumaSelect(TrumaParamEntity, SelectEntity):
             # invented off writes off_param itself, and nothing else.
             await self.async_write(off_param, 1)
         await self.async_write(param, value)
+
+
+class TrumaEnergySourceSelect(TrumaEntity, SelectEntity):
+    """Diesel, Elektro oder beides — als eine Entscheidung.
+
+    Diesel-Schalter und Elektro-Auswahl sind getrennt bedienbar, und damit
+    lässt sich versehentlich "beide aus" einstellen: die Heizung hat dann
+    keine Energiequelle und tut nichts, ohne dass irgendwo ein Fehler
+    erschiene. Drei Zustände können das nicht ausdrücken.
+
+    Der Upstream-Schalter ``switch.diesel`` bleibt daneben bestehen -- er ist
+    die einzige Möglichkeit, den Brenner einzeln zu schalten.
+    """
+
+    _attr_translation_key = "energy_source"
+
+    def __init__(self, coordinator: TrumaCoordinator, addr: int) -> None:
+        """Initialisieren."""
+        super().__init__(coordinator, addr, "energy_source")
+
+    @property
+    def _changing(self) -> bool:
+        return getattr(self.coordinator, "energy_source_changing", False)
+
+    @property
+    def options(self) -> list[str]:
+        """Während der Umstellung ist der Zwischenzustand ein eigener Eintrag.
+
+        Home Assistant weist jeden Zustand ab, der nicht in dieser Liste
+        steht; "changing" muss also wirklich darin auftauchen, solange es
+        gemeldet wird -- und danach wieder verschwinden, damit niemand es
+        auswählen kann.
+        """
+        return [*ENERGY_OPTIONS, ENERGY_CHANGING] if self._changing else ENERGY_OPTIONS
+
+    @property
+    def current_option(self) -> str | None:
+        """Die Quelle aus beiden Hardwarepegeln ableiten."""
+        if self._changing:
+            return ENERGY_CHANGING
+        diesel = self.device.get("EnergySrc", "DieselLevel")
+        electric = self.device.get("EnergySrc", "ElectricLevel")
+        if not isinstance(diesel, int) or not isinstance(electric, int):
+            return None
+        if diesel and electric:
+            return ENERGY_HYBRID
+        if diesel:
+            return ENERGY_DIESEL
+        if electric:
+            return ENERGY_ELECTRIC
+        # Beide aus: genau der Zustand, den diese Auswahl nicht herstellen
+        # kann, aber vorfinden darf -- etwa wenn die Heizung ganz aus ist.
+        return None
+
+    async def async_select_option(self, option: str) -> None:
+        """Beide Pegel als eine Transaktion schreiben.
+
+        Eine Transaktion und nicht zwei Writes: dazwischen stünde das Fahrzeug
+        kurz ohne Energiequelle oder auf einer, die niemand angefordert hat.
+        """
+        if option not in _ENERGY_WRITES:
+            raise HomeAssistantError(f"Unknown energy source {option}")
+        diesel, electric = _ENERGY_WRITES[option]
+        await self.coordinator.async_write_many(
+            [
+                (self._addr, "EnergySrc", "DieselLevel", diesel),
+                (self._addr, "EnergySrc", "ElectricLevel", electric),
+            ],
+            action="energy_source",
+            target=option,
+        )

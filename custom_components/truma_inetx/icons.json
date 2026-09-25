@@ -45,6 +45,9 @@
     "select": {
       "cooling_mode": {
         "default": "mdi:snowflake"
+      },
+      "energy_source": {
+        "default": "mdi:engine"
       }
     },
     "sensor": {

@@ -109,6 +109,15 @@
       "electric_level": {
         "name": "Elektrische Heizung"
       },
+      "energy_source": {
+        "name": "Energiequelle",
+        "state": {
+          "diesel": "Diesel",
+          "electric": "Elektro",
+          "hybrid": "Hybrid",
+          "changing": "Wird umgestellt …"
+        }
+      },
       "water_mode": {
         "name": "Warmwasser"
       }
