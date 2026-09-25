@@ -178,6 +178,15 @@
       "logic_supply": {
         "name": "Logic supply"
       },
+      "operation": {
+        "name": "Operation",
+        "state": {
+          "idle": "Ready",
+          "syncing": "Synchronizing",
+          "changing": "Changing …",
+          "error": "Error"
+        }
+      },
       "panel_clock": {
         "name": "Panel clock"
       },

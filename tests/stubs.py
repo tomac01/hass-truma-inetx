@@ -280,8 +280,21 @@ def install_homeassistant() -> None:
         SwitchDeviceClass=SimpleNamespace(SWITCH="switch"))
     mod("homeassistant.components.button", ButtonEntity=object)
     mod("homeassistant.components.select", SelectEntity=object)
+    class _RestoreNumber:
+        """RestoreNumber, so weit ein Test sie braucht."""
+
+        async def async_added_to_hass(self) -> None:
+            pass
+
+        async def async_get_last_number_data(self):
+            return getattr(self, "_restored", None)
+
+        def async_write_ha_state(self) -> None:
+            pass
+
     mod("homeassistant.components.number", NumberEntity=object,
-        NumberMode=SimpleNamespace(SLIDER="slider"))
+        RestoreNumber=_RestoreNumber,
+        NumberMode=SimpleNamespace(SLIDER="slider", BOX="box"))
     mod(
         "homeassistant.components.climate",
         FAN_OFF="off",

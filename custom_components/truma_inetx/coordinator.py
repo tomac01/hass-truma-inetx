@@ -41,6 +41,7 @@ from .const import (
     MODEL,
     NO_ROUTE_MISSES_BEFORE_WARNING,
 )
+from .operations import OperationRegistry
 from .proxy import TrumaProxyTracker
 from .truma.const import DEV_BLE_MGMT, DEV_PANEL
 from .truma.protocol import build_write_frame
@@ -172,6 +173,7 @@ class TrumaCoordinator(DataUpdateCoordinator[Bus]):
         self._bus = Bus()
         self._proxy_tracker = TrumaProxyTracker(self._async_proxy_changed)
         entry.async_on_unload(self._proxy_tracker.async_setup())
+        self._operations = OperationRegistry(self._async_operations_changed)
         # Der tatsächliche BLE-Sitzungszustand. ``bus.connected`` bleibt im
         # Poll-Betrieb zwischen den Polls bewusst true, damit gecachte
         # Bedienelemente verfügbar bleiben; dieses Flag ist das, was der
@@ -258,6 +260,26 @@ class TrumaCoordinator(DataUpdateCoordinator[Bus]):
     def _async_proxy_changed(self) -> None:
         """Geänderte Proxy-Registrierung an die Entitäten geben."""
         self.async_set_updated_data(self._bus)
+
+    @callback
+    def _async_operations_changed(self) -> None:
+        """Einen Vorgangswechsel an die Entitäten geben."""
+        self.async_set_updated_data(self._bus)
+
+    @property
+    def operation_state(self) -> str:
+        """Der Zustand für den Vorgangs-Sensor."""
+        return self._operations.state
+
+    @property
+    def operation_attributes(self) -> dict:
+        """Die Attribute für den Vorgangs-Sensor."""
+        return self._operations.attributes
+
+    @property
+    def energy_source_changing(self) -> bool:
+        """Ob eine Energiequellen-Transaktion läuft oder wartet."""
+        return self._operations.changing("energy_source")
 
     @callback
     def _remember_proxy_for_address(self, address: str) -> None:

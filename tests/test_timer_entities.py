@@ -111,7 +111,7 @@ def test_an_empty_slot_is_not_a_timer() -> None:
     _publish_panel(coordinator)
 
     timers = [e for e in switches if e._topic == "TimerConfig"]
-    schedules = [e for e in sensors if e._param.startswith("Timer")]
+    schedules = [e for e in sensors if getattr(e, "_param", "").startswith("Timer")]
     assert [e._param for e in timers] == ["Timer1State"], (
         "five empty slots were offered as switches that arm nothing"
     )
@@ -132,7 +132,7 @@ def test_a_slot_filled_later_appears_without_a_restart() -> None:
         "Timer1State",
         "Timer2State",
     ]
-    assert [e._param for e in sensors if e._param.startswith("Timer")] == [
+    assert [e._param for e in sensors if getattr(e, "_param", "").startswith("Timer")] == [
         "Timer1",
         "Timer2",
     ]

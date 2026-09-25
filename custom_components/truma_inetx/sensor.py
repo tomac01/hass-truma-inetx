@@ -4,15 +4,16 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from homeassistant.components.sensor import SensorEntity
+from homeassistant.components.sensor import SensorDeviceClass, SensorEntity
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from .const import LOGGER
 from .coordinator import TrumaConfigEntry, TrumaCoordinator
-from .entity import TrumaParamEntity, async_add_rows
+from .entity import TrumaEntity, TrumaParamEntity, async_add_rows
 from .profiles import Row, native
+from .truma.const import DEV_PANEL
 
 # Entities are coordinator-driven and have no update() method, so Home
 # Assistant would create no semaphore anyway; stated explicitly.
@@ -26,6 +27,7 @@ async def async_setup_entry(
 ) -> None:
     """Set up Truma sensors."""
     coordinator = entry.runtime_data
+    async_add_entities([TrumaOperationSensor(coordinator)])
     async_add_rows(
         coordinator,
         async_add_entities,
@@ -146,3 +148,28 @@ class TrumaSensor(TrumaParamEntity, SensorEntity):
                 self.row.translation_key,
             )
         return None
+
+
+class TrumaOperationSensor(TrumaEntity, SensorEntity):
+    """Der tatsächliche Vorgangs-Lebenszyklus, auch ohne BLE-Verbindung."""
+
+    _attr_translation_key = "operation"
+    _attr_device_class = SensorDeviceClass.ENUM
+    _attr_options = ["idle", "syncing", "changing", "error"]
+
+    def __init__(self, coordinator: TrumaCoordinator) -> None:
+        """Initialisieren."""
+        super().__init__(coordinator, DEV_PANEL, "operation")
+
+    @property
+    def available(self) -> bool:
+        """Immer verfügbar — sonst könnte er einen Fehler nicht zeigen."""
+        return True
+
+    @property
+    def native_value(self) -> str:
+        return self.coordinator.operation_state
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        return self.coordinator.operation_attributes

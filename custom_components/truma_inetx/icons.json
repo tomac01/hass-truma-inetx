@@ -78,6 +78,9 @@
       "logic_supply": {
         "default": "mdi:flash-outline"
       },
+      "operation": {
+        "default": "mdi:progress-clock"
+      },
       "panel_clock": {
         "default": "mdi:clock-outline"
       },

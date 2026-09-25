@@ -178,6 +178,15 @@
       "logic_supply": {
         "name": "Logikspannung"
       },
+      "operation": {
+        "name": "Vorgang",
+        "state": {
+          "idle": "Bereit",
+          "syncing": "Synchronisation läuft",
+          "changing": "Wird umgestellt …",
+          "error": "Fehler"
+        }
+      },
       "panel_clock": {
         "name": "Uhrzeit im Bedienteil"
       },

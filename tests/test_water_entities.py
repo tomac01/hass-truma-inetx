@@ -102,18 +102,22 @@ def test_water_values_land_under_the_device_that_published_them() -> None:
 def test_an_entity_appears_only_once_its_hardware_reports() -> None:
     coordinator = _coordinator()
     made = stubs.setup_platform(SENSOR, coordinator)
-    assert made == [], "created a sensor for hardware that never reported"
+    # Der Vorgangs-Sensor ist kein Bus-Parameter; alles andere muss gemeldet
+    # worden sein, bevor es eine Entität gibt.
+    assert _keys(made) == ["operation"], "created a sensor for hardware that never reported"
 
     coordinator.report("FreshWater", "Level", 25, BOARD)
-    assert _keys(made) == ["fresh_water_level"], "the tank reported and got no sensor"
+    assert _keys(made) == ["operation", "fresh_water_level"], (
+        "the tank reported and got no sensor"
+    )
 
     # An unrelated parameter must not conjure the rest.
     coordinator.report("Eol", "Vcc12", 13800, HEATER)
-    assert _keys(made) == ["fresh_water_level", "voltage"]
+    assert _keys(made) == ["operation", "fresh_water_level", "voltage"]
 
     # Repeated reports of the same parameter must not duplicate the entity.
     coordinator.report("FreshWater", "Level", 50, BOARD)
-    assert len(made) == 2
+    assert len(made) == 3
 
     coordinator.report("GreyWater", "Level", 0, BOARD)
     assert "grey_water_level" in _keys(made)
@@ -144,7 +148,7 @@ def test_data_already_in_hand_needs_no_second_pass() -> None:
 
     made = stubs.setup_platform(SENSOR, coordinator)
 
-    assert _keys(made) == ["grey_water_level"], (
+    assert _keys(made) == ["operation", "grey_water_level"], (
         "an already-reported tank got no sensor on reload"
     )
 

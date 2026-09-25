@@ -76,7 +76,9 @@ def test_a_value_alone_does_not_build_an_entity() -> None:
     made = stubs.setup_platform(SENSOR, coordinator)
     coordinator.report("AirHeating", "Temp", 228, HEATER)
 
-    assert made == [], _keys(made)
+    # Der Vorgangs-Sensor ist kein Bus-Parameter und wartet auf keinen Namen:
+    # er existiert ab dem Setup, damit er einen Fehler auch ohne Bus zeigen kann.
+    assert _keys(made) == ["operation"], _keys(made)
 
     # ...and the wait was not recorded as done: the entity is built at the
     # update that settles the name, not skipped for the life of the session.
@@ -127,7 +129,7 @@ def test_nothing_waits_past_the_end_of_discovery() -> None:
     coordinator = _coordinator()
     made = stubs.setup_platform(SENSOR, coordinator)
     coordinator.report("AirCooling", "Temp", 245, ROOF_AC)
-    assert made == []
+    assert _keys(made) == ["operation"], _keys(made)
 
     coordinator.data.discovered = True
     coordinator.report("AirCooling", "Temp", 245, ROOF_AC)
