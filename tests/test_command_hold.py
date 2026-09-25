@@ -13,7 +13,9 @@ Was der Test festnagelt:
    grundsätzlich nie auflegt,
 2. im Nachlauffenster überstimmt der Hold beides: die Stille *und* die
    maximale Verweildauer,
-3. er überstimmt sie nicht länger als das Fenster,
+3. er überstimmt sie nicht länger als das Fenster -- einmal über jeden
+   der beiden Zweige, die den Poll beenden können: die Stille (Panel
+   schweigt) und die Verweilgrenze (Panel redet durch),
 4. reißt der Link im Fenster, wird schnell neu verbunden statt im Poll-Takt,
 5. ohne Fenster gilt wieder Poll-Takt bzw. der gewachsene Backoff,
 6. ein laufendes Live-Fenster wirkt genauso,
@@ -64,16 +66,23 @@ class _Clock:
 
 
 class _FastForward:
-    """``asyncio``-Ersatz, dessen ``sleep`` die Uhr weiterstellt."""
+    """``asyncio``-Ersatz, dessen ``sleep`` die Uhr weiterstellt.
 
-    def __init__(self, clock: _Clock) -> None:
+    Redet das Panel des Coordinators durch, kommt mit jedem Tick auch ein
+    Frame herein -- die Verweilschleife sieht dann nie Stille.
+    """
+
+    def __init__(self, clock: _Clock, coord: "_Coord | None" = None) -> None:
         self._clock = clock
+        self._coord = coord
 
     def __getattr__(self, name):  # alles andere ist das echte asyncio
         return getattr(asyncio, name)
 
     async def sleep(self, delay, *_a, **_kw):
         self._clock.now += delay
+        if self._coord is not None and self._coord.panel_talks:
+            self._coord._last_frame = self._clock.now
         await asyncio.sleep(0)
 
 
@@ -90,9 +99,10 @@ class _Coord:
 
     unique_id = "Truma iNetX-15E02F"
 
-    def __init__(self, poll_interval: int = 300) -> None:
+    def __init__(self, poll_interval: int = 300, panel_talks: bool = False) -> None:
         self.clock = _Clock()
-        COORD.asyncio = _FastForward(self.clock)
+        self.panel_talks = panel_talks
+        COORD.asyncio = _FastForward(self.clock, self)
         self.hass = stubs.SimpleNamespace(loop=self.clock)
         self.poll_interval = poll_interval
         self._bus = BUS.Bus()
@@ -149,8 +159,13 @@ def test_hold_outlasts_both_silence_and_max_dwell() -> None:
     assert held > COORD._POLL_MAX_DWELL, "die Verweilgrenze hat gewonnen"
 
 
-def test_hold_does_not_outlast_its_own_window() -> None:
-    """Der Nachlauf hält den Link nicht länger als das Fenster."""
+def test_hold_does_not_outlast_its_own_window_when_the_panel_falls_silent() -> None:
+    """Der Nachlauf hält den Link nicht länger als das Fenster.
+
+    Dieses Panel schweigt, also beendet die Stille-Prüfung den Poll. Den
+    anderen Zweig -- die Verweilgrenze -- prüft der Test darunter; er allein
+    hinge sonst in der Luft.
+    """
     coord = _Coord()
     coord._command_hold_until = coord.clock.now + COORD._COMMAND_HOLD_SECONDS
 
@@ -158,6 +173,26 @@ def test_hold_does_not_outlast_its_own_window() -> None:
 
     # Ein Tick Toleranz: die Schleife merkt den Ablauf erst beim nächsten.
     assert held <= COORD._COMMAND_HOLD_SECONDS + 1, f"{held}s festgehalten"
+
+
+def test_hold_does_not_outlast_its_own_window_when_the_panel_talks_on() -> None:
+    """Auch ein durchredendes Panel hält den Link nicht über das Fenster.
+
+    Hier trägt die Stille-Prüfung nichts bei: es kommt jede Sekunde ein
+    Frame. Was den Poll beendet, ist die Verweilgrenze -- und die zählt ab
+    dem Beginn des Polls, nicht ab dem Ende des Nachlaufs. Zöge der
+    Hold-Zweig ``started`` mit, liefe der Link nach dem Fenster noch eine
+    volle Verweilgrenze weiter.
+    """
+    coord = _Coord(panel_talks=True)
+    coord._command_hold_until = coord.clock.now + COORD._COMMAND_HOLD_SECONDS
+
+    held = _dwell(coord)
+
+    assert held <= COORD._COMMAND_HOLD_SECONDS + 1, (
+        f"{held}s festgehalten, das Fenster war nur "
+        f"{COORD._COMMAND_HOLD_SECONDS}s lang"
+    )
 
 
 def test_hold_shortens_the_reconnect_delay() -> None:
