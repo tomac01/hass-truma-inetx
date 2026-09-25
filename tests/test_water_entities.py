@@ -130,8 +130,11 @@ def test_an_entity_belongs_to_the_device_that_reported_it() -> None:
     coordinator.report("AirCirculation", "FanLevel", 4, HEATER)
     coordinator.report("AirCirculation", "FanLevel", 2, ROOF_AC)
 
-    assert len(made) == 2, "the roof unit's fan overwrote the Combi's again (#9)"
-    by_addr = {entity._addr: entity for entity in made}
+    # Nur die aus Rows gebauten: die Live-Modus-Dauer hängt an keinem
+    # Parameter und steht auf der Plattform von Anfang an mit dabei.
+    fans = [e for e in made if type(e).__name__ == "TrumaNumber"]
+    assert len(fans) == 2, "the roof unit's fan overwrote the Combi's again (#9)"
+    by_addr = {entity._addr: entity for entity in fans}
     assert by_addr[HEATER].native_value == 4
     assert by_addr[ROOF_AC].native_value == 2
     # ...and they are two entities on two devices, not two on one.

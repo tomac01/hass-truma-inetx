@@ -1,4 +1,4 @@
-"""Button platform: the one bus parameter that is an action, not a state."""
+"""Button platform: the bus parameter that is an action, plus the link's own."""
 
 from __future__ import annotations
 
@@ -7,8 +7,9 @@ from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
-from .coordinator import TrumaConfigEntry
-from .entity import TrumaParamEntity, async_add_rows
+from .coordinator import TrumaConfigEntry, TrumaCoordinator
+from .entity import TrumaEntity, TrumaParamEntity, async_add_rows
+from .truma.const import DEV_PANEL
 
 # Entities are coordinator-driven and have no update() method, so Home
 # Assistant would create no semaphore anyway; stated explicitly.
@@ -28,6 +29,12 @@ async def async_setup_entry(
 ) -> None:
     """Set up the Truma buttons, on the devices that publish them."""
     coordinator = entry.runtime_data
+    # Die beiden Live-Modus-Knöpfe haengen an keinem Busparameter: sie
+    # bedienen den BLE-Link selbst und entstehen deshalb unbedingt, noch
+    # bevor irgendein Gerät etwas gemeldet hat.
+    async_add_entities(
+        [TrumaManualSyncButton(coordinator), TrumaManualStopButton(coordinator)]
+    )
     async_add_rows(
         coordinator,
         async_add_entities,
@@ -74,3 +81,40 @@ class TrumaResetButton(TrumaParamEntity, ButtonEntity):
     async def async_press(self) -> None:
         """Ask the appliance to clear its fault."""
         await self.async_write(self._param, 1)
+
+
+class TrumaManualSyncButton(TrumaEntity, ButtonEntity):
+    """BLE jetzt wecken und die eingestellte Live-Dauer starten."""
+
+    _attr_translation_key = "manual_sync"
+    # Nicht am Link haengen: sonst wäre ausgerechnet der Knopf verschwunden,
+    # mit dem man die Verbindung holt.
+    _gate_on_connected = False
+
+    def __init__(self, coordinator: TrumaCoordinator) -> None:
+        """Initialisieren."""
+        super().__init__(coordinator, DEV_PANEL, "manual_sync")
+
+    async def async_press(self) -> None:
+        """Die manuelle Sitzung über den Coordinator anfordern."""
+        # Die Dauer wird beim Druck gelesen, nicht beim Bauen: die
+        # Number-Entität darf später entstehen und jederzeit verstellt
+        # werden.
+        await self.coordinator.async_request_manual_session(
+            self.coordinator.manual_live_minutes
+        )
+
+
+class TrumaManualStopButton(TrumaEntity, ButtonEntity):
+    """Ein laufendes Live-Fenster vorzeitig beenden."""
+
+    _attr_translation_key = "manual_stop"
+    _gate_on_connected = False
+
+    def __init__(self, coordinator: TrumaCoordinator) -> None:
+        """Initialisieren."""
+        super().__init__(coordinator, DEV_PANEL, "manual_stop")
+
+    async def async_press(self) -> None:
+        """Das Fenster über den Coordinator freigeben."""
+        await self.coordinator.async_end_manual_session()

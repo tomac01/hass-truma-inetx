@@ -74,11 +74,20 @@
     "button": {
       "error_reset": {
         "name": "Störung zurücksetzen"
+      },
+      "manual_stop": {
+        "name": "Live-Modus beenden"
+      },
+      "manual_sync": {
+        "name": "Jetzt synchronisieren / Live-Modus starten"
       }
     },
     "number": {
       "fan_level": {
         "name": "Lüfterstufe"
+      },
+      "manual_live_minutes": {
+        "name": "Live-Modus-Dauer"
       },
       "panel_brightness": {
         "name": "Displayhelligkeit"

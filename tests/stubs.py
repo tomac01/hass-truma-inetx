@@ -213,7 +213,7 @@ def install_homeassistant() -> None:
         UnitOfElectricPotential=SimpleNamespace(VOLT="V"),
         UnitOfMass=SimpleNamespace(KILOGRAMS="kg"),
         UnitOfTemperature=SimpleNamespace(CELSIUS="°C"),
-        UnitOfTime=SimpleNamespace(SECONDS="s"),
+        UnitOfTime=SimpleNamespace(MINUTES="min", SECONDS="s"),
     )
     mod("homeassistant.exceptions", HomeAssistantError=RuntimeError)
     mod("homeassistant.loader", async_get_integration=None)

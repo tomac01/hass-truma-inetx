@@ -74,11 +74,20 @@
     "button": {
       "error_reset": {
         "name": "Reset fault"
+      },
+      "manual_stop": {
+        "name": "End live mode"
+      },
+      "manual_sync": {
+        "name": "Sync now / start live mode"
       }
     },
     "number": {
       "fan_level": {
         "name": "Fan level"
+      },
+      "manual_live_minutes": {
+        "name": "Live mode duration"
       },
       "panel_brightness": {
         "name": "Display brightness"

@@ -1,15 +1,21 @@
-"""Number platform: every bus parameter the table presents as a slider."""
+"""Number platform: sliders for bus parameters, plus the live-mode duration.
+
+Die Dauer ist der eine Eintrag hier, der kein Busparameter ist: sie sagt,
+wie lange der Link nach einer angeforderten Synchronisation offen bleibt,
+und wird rein lokal gehalten.
+"""
 
 from __future__ import annotations
 
-from homeassistant.components.number import NumberEntity, NumberMode
-from homeassistant.const import Platform
+from homeassistant.components.number import NumberEntity, NumberMode, RestoreNumber
+from homeassistant.const import Platform, UnitOfTime
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from .coordinator import TrumaConfigEntry, TrumaCoordinator
-from .entity import TrumaParamEntity, async_add_rows
+from .entity import TrumaEntity, TrumaParamEntity, async_add_rows
 from .profiles import Row
+from .truma.const import DEV_PANEL
 
 # Entities are coordinator-driven and have no update() method, so Home
 # Assistant would create no semaphore anyway; stated explicitly.
@@ -23,6 +29,9 @@ async def async_setup_entry(
 ) -> None:
     """Set up the Truma numbers."""
     coordinator = entry.runtime_data
+    # Hängt an keinem Busparameter: die Dauer ist eine lokale Einstellung für
+    # den Link selbst und entsteht deshalb unbedingt.
+    async_add_entities([TrumaManualLiveMinutes(coordinator)])
     async_add_rows(
         coordinator,
         async_add_entities,
@@ -93,3 +102,56 @@ class TrumaNumber(TrumaParamEntity, NumberEntity):
     async def async_set_native_value(self, value: float) -> None:
         """Write the value to the device that owns the parameter."""
         await self.async_write(self._param, int(value))
+
+
+class TrumaManualLiveMinutes(TrumaEntity, RestoreNumber):
+    """Vom Nutzer gewählte Dauer für eine sofortige BLE-Sitzung."""
+
+    _attr_translation_key = "manual_live_minutes"
+    _attr_native_min_value = 0
+    _attr_native_max_value = 999
+    _attr_native_step = 1
+    _attr_native_unit_of_measurement = UnitOfTime.MINUTES
+    # Eine Box, kein Schieber: 999 Minuten auf einem Schieber trifft niemand.
+    _attr_mode = NumberMode.BOX
+    # Nicht am Link hängen: die Dauer stellt man ein, *bevor* die Verbindung
+    # steht, und sie fasst BLE selbst nie an.
+    _gate_on_connected = False
+
+    def __init__(self, coordinator: TrumaCoordinator) -> None:
+        """Mit der sicheren Ein-Refresh-Voreinstellung initialisieren."""
+        super().__init__(coordinator, DEV_PANEL, "manual_live_minutes")
+        self._attr_native_value = 0
+
+    async def async_added_to_hass(self) -> None:
+        """Die zuletzt gewählte Dauer nach einem Neustart wiederherstellen."""
+        await super().async_added_to_hass()
+        restored = await self.async_get_last_number_data()
+        if restored is not None:
+            try:
+                await self.async_set_native_value(restored.native_value)
+            except (TypeError, ValueError):
+                # Ein Stand, den diese Version nicht mehr annimmt, darf den
+                # Start nicht kosten -- zurück auf das sichere einmalige Lesen.
+                self._attr_native_value = 0
+                self.coordinator.manual_live_minutes = 0
+        else:
+            self._attr_native_value = 0
+            self.coordinator.manual_live_minutes = 0
+
+    async def async_set_native_value(self, value: float) -> None:
+        """Ganze Minuten lokal merken; BLE wird dabei nicht angefasst."""
+        # ``True`` ist in Python eine 1 und käme sonst als eine Minute durch.
+        if isinstance(value, bool):
+            raise ValueError("Live mode duration must be a whole number")
+        numeric = float(value)
+        if not numeric.is_integer() or not 0 <= numeric <= 999:
+            raise ValueError(
+                "Live mode duration must be a whole number from 0 to 999 minutes"
+            )
+        minutes = int(numeric)
+        # Erst prüfen, dann merken: ein abgewiesener Wert lässt den zuletzt
+        # gültigen stehen.
+        self._attr_native_value = minutes
+        self.coordinator.manual_live_minutes = minutes
+        self.async_write_ha_state()

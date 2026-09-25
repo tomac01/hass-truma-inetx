@@ -17,11 +17,20 @@
     "button": {
       "error_reset": {
         "default": "mdi:restart-alert"
+      },
+      "manual_stop": {
+        "default": "mdi:bluetooth-off"
+      },
+      "manual_sync": {
+        "default": "mdi:bluetooth-connect"
       }
     },
     "number": {
       "fan_level": {
         "default": "mdi:fan"
+      },
+      "manual_live_minutes": {
+        "default": "mdi:timer-cog-outline"
       },
       "panel_brightness": {
         "default": "mdi:brightness-6"
