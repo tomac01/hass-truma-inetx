@@ -43,8 +43,8 @@ from .const import (
 )
 from .operations import OperationRegistry
 from .proxy import TrumaProxyTracker
-from .truma.const import DEV_BLE_MGMT, DEV_PANEL
-from .truma.protocol import build_write_frame
+from .truma.const import CTRL_MBP, DEV_BLE_MGMT, DEV_PANEL, MBP_PARAM_DISC
+from .truma.protocol import build_v3_frame, build_write_frame
 
 type TrumaConfigEntry = ConfigEntry[TrumaCoordinator]
 
@@ -134,6 +134,34 @@ _STORAGE_VERSION = 1
 # In poll mode this is not used: every poll re-runs startup, which asks once,
 # so the reading is as fresh as the poll it came with.
 _MEASURE_INTERVAL = 60  # seconds
+
+# Ein Schreibvorgang gilt erst als erfolgt, wenn das Gerät selbst den neuen
+# Wert meldet. Der Transport-ACK sagt nur, dass das Panel den Frame genommen
+# hat -- gemessen wurde ein quittierter Befehl, den die Heizung während des
+# Nachlüftens nicht ausführte.
+#
+# Zeit, die wir dem Gerät je Anlauf für seine Antwort geben. Ein aufwachender
+# Brenner meldet verzögert; zwölf Sekunden liegen über dem gemessenen Maximum
+# und noch unter der Geduld eines Bedieners vor dem Panel.
+_WRITE_FEEDBACK_TIMEOUT = 12  # seconds
+# Ein schlafendes Gerät antwortet oft erst beim zweiten Anlauf.
+_WRITE_ATTEMPTS = 3
+_WRITE_RETRY_PAUSE = 2  # seconds
+# Vor der Endprüfung einer Mehrfach-Transaktion, damit Folgemeldungen
+# ankommen, die das Gerät erst nach dem letzten Befehl schickt.
+_WRITE_SETTLE = 1  # seconds
+
+# WaterHeating.Active meldet 1 (heizt) oder 2 (ein, Solltemperatur erreicht).
+# Beides bestätigt "ein"; nur eine frische 0 bestätigt "aus". Die
+# Dreiwertigkeit ist die des Protokolls (siehe bus.ActiveState) -- neu ist
+# hier nur, sie als Bestätigung gelten zu lassen.
+_ENABLED_STATES = (1, 2)
+
+# Nach einem Befehl bleibt der Link mindestens so lange offen. Deutlich mehr
+# als _POLL_QUIET, weil nach einer Bedienung meist weitere folgen und die
+# Heizung ihre Folgeänderungen verzögert nachmeldet. Der Wert ist absolut,
+# nicht additiv: zehn schnelle Befehle ergeben nicht zehn Minuten.
+_COMMAND_HOLD_SECONDS = 60  # seconds
 
 
 class TrumaCoordinator(DataUpdateCoordinator[Bus]):
@@ -233,6 +261,13 @@ class TrumaCoordinator(DataUpdateCoordinator[Bus]):
         self._wake_event = asyncio.Event()
         self._connected_event = asyncio.Event()
         self._writes_pending = 0
+        # Werte, die eingetroffen sind, während ein Schreibvorgang auf seine
+        # Bestätigung wartet: (addr, topic, param) -> Wert. None, solange
+        # nichts geschrieben wird -- daran erkennt der Frame-Pfad, dass er
+        # sich die Buchführung sparen kann.
+        self._write_feedback: dict[tuple[int, str, str], int] | None = None
+        # Loop-Zeitpunkt, bis zu dem nach einem Befehl nicht aufgelegt wird.
+        self._command_hold_until = 0.0
 
     async def _async_update_data(self) -> Bus:
         """Return the shared bus (updated by BLE notifications)."""
@@ -1044,6 +1079,8 @@ class TrumaCoordinator(DataUpdateCoordinator[Bus]):
         """
         # Any frame proves the link is alive; feed the stall watchdog.
         self._last_frame = self.hass.loop.time()
+        # ...and it may be the answer a pending write is waiting for.
+        self._note_frame_values(parsed)
 
         if session.handle_frame(self._bus, parsed, self._client, self.unique_id):
             self.async_set_updated_data(self._bus)
@@ -1051,6 +1088,55 @@ class TrumaCoordinator(DataUpdateCoordinator[Bus]):
             # registered, which is the one thing the entity-creation gate
             # cannot cover.
             self.async_sync_device_names()
+
+    @callback
+    def _note_frame_values(self, parsed: dict) -> None:
+        """Jeden Wert eines Frames für eine wartende Schreibbestätigung anbieten.
+
+        Zwei Frameformen tragen Werte, und beide zählen: die unaufgeforderte
+        Einzelmeldung (``tn``/``pn``/``v`` direkt im CBOR) und die Antwort auf
+        die Parameter-Abfrage, mit der ``_write_confirmed`` ein schlafendes
+        Gerät weckt (``topics`` mit verschachtelten ``parameters``). Nur die
+        erste zu lesen hieße, genau die Antwort zu verpassen, um die wir eben
+        gebeten haben.
+
+        Das Auseinandernehmen der Frames ist sonst ``session.handle_frame``s
+        Sache; hier steht es, weil nur der Coordinator weiß, welcher Wert
+        gerade erwartet wird -- und weil außerhalb eines Schreibvorgangs
+        nichts davon getan wird.
+        """
+        if self._write_feedback is None:
+            return
+        src = parsed.get("src")
+        cbor = parsed.get("cbor")
+        if not isinstance(src, int) or not isinstance(cbor, dict):
+            return
+        topic, param, value = cbor.get("tn"), cbor.get("pn"), cbor.get("v")
+        if topic and param and value is not None:
+            self.on_frame_value(src, topic, param, value)
+        for entry in cbor.get("topics") or []:
+            if not isinstance(entry, dict):
+                continue
+            topic = entry.get("tn", "")
+            for item in entry.get("parameters") or []:
+                if not isinstance(item, dict):
+                    continue
+                param, value = item.get("pn"), item.get("v")
+                if topic and param and value is not None:
+                    self.on_frame_value(src, topic, param, value)
+
+    @callback
+    def on_frame_value(self, addr: int, topic: str, param: str, value: int) -> None:
+        """Einen eingetroffenen Wert für eine wartende Schreibbestätigung merken.
+
+        Der Eintrag wird beim Prüfen per ``pop`` entfernt, und
+        ``_write_confirmed`` räumt ihn vor jedem Anlauf weg: bestätigen darf
+        nur eine Meldung, die nach dem Frame eingetroffen ist. Der Bus taugt
+        dafür nicht -- der hält auch den Wert von vorher, und ein Befehl, der
+        nichts bewirkt, würde sich aus dem Cache selbst bestätigen.
+        """
+        if self._write_feedback is not None:
+            self._write_feedback[(addr, topic, param)] = value
 
     @callback
     def _mark_disconnected(self) -> None:
@@ -1092,38 +1178,157 @@ class TrumaCoordinator(DataUpdateCoordinator[Bus]):
     async def async_write(
         self, addr: int, topic: str, param: str, value: int
     ) -> None:
-        """Validate and send a parameter write to the device that owns it.
+        """Einen einzelnen Parameter schreiben und bestätigen lassen."""
+        await self.async_write_many([(addr, topic, param, value)])
 
-        ``addr`` is the bus address of the entity's own device, which is where
-        the write goes -- the sole exception being the handful of topics the
-        panel relays for the bus (see ``COMMAND_DEST``). Addressing a write to
-        a device named in the source used to be the bug class of #10: a write
-        of AirCooling.TgtTemp to the Combi was acknowledged by the transport
-        and then silently dropped, because on that vehicle the thing that
-        cools is a roof unit at its own address.
+    async def async_write_many(
+        self,
+        commands: list[tuple[int, str, str, int]],
+        *,
+        action: str | None = None,
+        target: object = None,
+    ) -> None:
+        """Mehrere Parameter als eine Nutzeraktion schreiben und bestätigen lassen.
 
-        The device confirms by pushing an updated value, which flows back
-        through the normal notification path and updates the entity.
+        ``addr`` ist jeweils die Busadresse des Geräts der Entität, und dorthin
+        geht der Befehl -- einzige Ausnahme sind die wenigen Topics, die das
+        Panel für den Bus weiterreicht (siehe ``COMMAND_DEST``). Einen Befehl
+        an ein Gerät zu adressieren, das in der Quelle genannt wird, war die
+        Fehlerklasse von #10: ein AirCooling.TgtTemp an die Combi wurde vom
+        Transport quittiert und dann still verworfen, weil auf jenem Fahrzeug
+        ein Dachgerät kühlt.
+
+        Und genau dort hört ein Transport-ACK auf zu taugen: er sagt, dass das
+        Panel den Frame genommen hat, nicht dass danach etwas geschehen ist.
+        Gemessen wurde ein quittierter Befehl, den die Heizung während des
+        Nachlüftens nicht ausführte. Bestätigt ist ein Schreibvorgang erst,
+        wenn das Zielgerät den neuen Wert selbst meldet.
+
+        Alle Befehle werden zuerst geprüft und erst dann gesendet: eine
+        Transaktion, die auf halbem Weg an der eigenen Validierung scheitert,
+        ließe das Fahrzeug in einem Zustand zurück, den niemand angefordert
+        hat.
         """
-        ok, msg = self._bus.validate_write(addr, topic, param, value)
-        if not ok:
-            raise HomeAssistantError(f"Invalid Truma command: {msg}")
+        for addr, topic, param, value in commands:
+            ok, msg = self._bus.validate_write(addr, topic, param, value)
+            if not ok:
+                raise HomeAssistantError(f"Invalid Truma command: {msg}")
 
-        # Held across the whole write, not just the wait for a link: in poll
-        # mode the loop checks this before hanging up, and releasing it early
-        # would let it disconnect between getting the client and sending.
-        self._writes_pending += 1
-        try:
-            client = await self._client_for_write()
+        with self._operations.operation(action or self._infer_action(commands), target):
+            # Über den ganzen Vorgang gehalten, nicht nur über das Warten auf
+            # einen Link: im Poll-Betrieb prüft die Schleife das, bevor sie
+            # auflegt, und ein früh freigegebenes Flag ließe sie zwischen
+            # Client-Holen und Senden auflegen.
+            self._writes_pending += 1
+            self._write_feedback = {}
+            try:
+                client = await self._client_for_write()
+                for addr, topic, param, value in commands:
+                    dest = self._bus.command_dest(addr, topic)
+                    await self._write_confirmed(client, dest, topic, param, value)
+                if len(commands) > 1:
+                    # Jeder einzelne Befehl wurde bestätigt -- was nicht heißt,
+                    # dass am Ende alle zugleich gelten. Eine Heizung kann eine
+                    # frühere Einstellung zurücknehmen, während die nächste
+                    # ankommt (Gas und Strom schließen sich je nach Modus aus).
+                    await asyncio.sleep(_WRITE_SETTLE)
+                    for addr, topic, param, value in commands:
+                        dest = self._bus.command_dest(addr, topic)
+                        got = self._bus.device(dest).get(topic, param)
+                        if not isinstance(got, int) or not self._feedback_satisfied(
+                            topic, param, value, got
+                        ):
+                            raise HomeAssistantError(
+                                f"Truma did not retain the requested setting "
+                                f"{topic}.{param}={value}"
+                            )
+            finally:
+                self._write_feedback = None
+                self._writes_pending -= 1
+                # Auch nach einem Fehlschlag: der Nutzer soll sofort
+                # nachsteuern können, ohne auf den nächsten Poll zu warten.
+                self._command_hold_until = (
+                    self.hass.loop.time() + _COMMAND_HOLD_SECONDS
+                )
 
-            dest = self._bus.command_dest(addr, topic)
+    async def _write_confirmed(
+        self, client: TrumaBleClient, dest: int, topic: str, param: str, value: int
+    ) -> None:
+        """Einen Parameter schreiben und auf die Bestätigung des Geräts warten."""
+        for attempt in range(_WRITE_ATTEMPTS):
+            # Alles, was vor diesem Anlauf gemeldet wurde, zählt nicht: es kann
+            # den Stand von vor dem Befehl tragen, und eine Meldung, die zufällig
+            # schon den Wunschwert trug, würde den Befehl bestätigen, ohne dass
+            # er je ausgeführt wurde.
+            if self._write_feedback is not None:
+                self._write_feedback.pop((dest, topic, param), None)
             frame = build_write_frame(client.assigned_addr, dest, topic, param, value)
-            LOGGER.debug(
-                "Truma write %s.%s = %s -> 0x%04X", topic, param, value, dest
-            )
+            LOGGER.debug("Truma write %s.%s = %s -> 0x%04X", topic, param, value, dest)
             if not await client.send(frame):
                 raise HomeAssistantError(
                     f"Truma did not acknowledge write {topic}.{param}={value}"
                 )
-        finally:
-            self._writes_pending -= 1
+            # Ein schlafender oder gerade aufwachender Brenner schickt den
+            # geänderten Wert nicht von selbst -- also danach fragen.
+            await self._request_param_discovery(client, dest)
+            if await self._await_feedback(dest, topic, param, value):
+                return
+            if not client.connected or attempt == _WRITE_ATTEMPTS - 1:
+                break
+            await asyncio.sleep(_WRITE_RETRY_PAUSE)
+        raise HomeAssistantError(f"Truma did not confirm {topic}.{param}={value}")
+
+    async def _await_feedback(
+        self, dest: int, topic: str, param: str, value: int
+    ) -> bool:
+        """Auf eine frische Meldung des Zielgeräts warten."""
+        deadline = self.hass.loop.time() + _WRITE_FEEDBACK_TIMEOUT
+        while self.hass.loop.time() < deadline:
+            await asyncio.sleep(0.2)
+            got = (self._write_feedback or {}).pop((dest, topic, param), None)
+            if got is None:
+                continue
+            if self._feedback_satisfied(topic, param, value, got):
+                return True
+        return False
+
+    @staticmethod
+    def _feedback_satisfied(topic: str, param: str, wanted: int, got: int) -> bool:
+        """Ob die Rückmeldung den gewünschten Wert bestätigt.
+
+        Überall exakt -- mit genau einer Ausnahme: ``WaterHeating.Active``
+        meldet 1 (heizt) oder 2 (ein, Solltemperatur erreicht), und beides
+        heißt "ein". Die Temperaturstufe ``WaterHeating.Mode`` und jedes
+        andere ``Active`` sind davon nicht berührt.
+        """
+        if (topic, param) == ("WaterHeating", "Active") and wanted == 1:
+            return got in _ENABLED_STATES
+        return got == wanted
+
+    async def _request_param_discovery(
+        self, client: TrumaBleClient, dest: int
+    ) -> None:
+        """Ein Gerät bitten, seine Parameter erneut zu melden.
+
+        Als Sonde gesendet: ein schlafendes Gerät darf schweigen, ohne dass
+        der Transport die Sitzung für mehrdeutig erklärt -- das Ausbleiben der
+        Antwort behandelt der Anlauf selbst.
+        """
+        frame = build_v3_frame(
+            dest, client.assigned_addr, CTRL_MBP, MBP_PARAM_DISC, 0, b""
+        )
+        await client.send(frame, probe=True)
+
+    @staticmethod
+    def _infer_action(commands: list[tuple[int, str, str, int]]) -> str:
+        """Aus dem letzten Befehl einen Namen für die Anzeige ableiten."""
+        _addr, topic, param, _value = commands[-1]
+        return {
+            ("RoomClimate", "Mode"): "hvac_mode",
+            ("AirHeating", "TgtTemp"): "temperature",
+            ("AirCirculation", "FanLevel"): "fan_level",
+            ("EnergySrc", "ElectricLevel"): "electric_heating",
+            ("WaterHeating", "Active"): "water_mode",
+            ("WaterHeating", "Mode"): "water_mode",
+            ("WaterHeating", "FasterHeatingMode"): "water_priority",
+        }.get((topic, param), f"{topic}.{param}")

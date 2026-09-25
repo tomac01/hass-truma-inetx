@@ -40,7 +40,7 @@ stubs.stub_transport()
 sys.modules["homeassistant.const"].EVENT_HOMEASSISTANT_STOP = "homeassistant_stop"
 stubs.mod("truma_pkg.session", run_startup=None, request_measurements=None,
           StartupFailed=RuntimeError, handle_frame=None)
-stubs.mod("truma_pkg.truma.protocol", build_write_frame=None)
+stubs.stub_protocol()
 stubs.load("bus")
 stubs.load("const")
 stubs.load("coordinator")

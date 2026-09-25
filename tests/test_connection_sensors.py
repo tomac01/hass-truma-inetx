@@ -56,7 +56,7 @@ stubs.stub_transport()
 # ohne Drittbibliothek importierbar bleibt.
 stubs.mod("truma_pkg.session", run_startup=None, request_measurements=None,
           StartupFailed=RuntimeError, handle_frame=None)
-stubs.mod("truma_pkg.truma.protocol", build_write_frame=None)
+stubs.stub_protocol()
 BUS = stubs.load("bus")
 stubs.load("const")
 # Der echte Coordinator, nicht das Platzhalter-Modul: die Entitäten lesen

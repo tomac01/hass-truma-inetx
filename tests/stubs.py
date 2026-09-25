@@ -346,6 +346,25 @@ class _FakeProxyTracker:
         self.source = source
 
 
+def stub_protocol(**overrides) -> ModuleType:
+    """Die Frame-Bauer stubben, für Tests, die nicht vom Protokoll handeln.
+
+    Als eigene Funktion, weil die Liste sonst in jeder Testdatei steht, die
+    keinen dieser Bauer je aufruft: ein neuer Bauer im Coordinator liess vier
+    Tests zugleich am Import scheitern, ohne dass einer davon von Frames
+    handelt. ``overrides`` ist für den einen Test, der echte Frames braucht.
+    """
+    return mod("truma_pkg.truma.protocol", **{
+        "build_identity_frames": None,
+        "build_register_frame": None,
+        "build_subscribe_frame": None,
+        "build_v3_frame": None,
+        "build_write_frame": None,
+        "parse_v3_frame": None,
+        **overrides,
+    })
+
+
 def stub_transport() -> None:
     """Stub the BLE transport modules, for tests that are not about it."""
     mod("truma_pkg.ble", TrumaBleClient=object, device_from_bluez=None,
