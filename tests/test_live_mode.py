@@ -15,10 +15,14 @@ Was der Test festnagelt:
 5. ein schweigendes Panel gilt nicht als geglückte Synchronisation,
 6. ein gescheiterter Refresh gibt sein eigenes Fenster frei -- und löscht
    dabei kein neueres,
-7. eine wartende Anfrage lässt sich abbrechen,
-8. und vor allem: die **Prüfreihenfolge** der Verweilschleife.
+7. ein Handshake, der nie zustande kommt, wird als Fehler gemeldet,
+8. eine wartende Anfrage lässt sich abbrechen,
+9. „Beenden" schließt ein laufendes Fenster wirklich -- und setzt keinen
+   Wunsch ab, wenn gar keines läuft,
+10. ein Befehl und eine frische Anfrage widerrufen einen Release-Wunsch,
+11. und vor allem: die **Prüfreihenfolge** der Verweilschleife.
 
-Zu Punkt 8, der der eigentliche Grund für diese Datei ist. Die Schleife
+Zu Punkt 11, der der eigentliche Grund für diese Datei ist. Die Schleife
 prüft
 ``Writes/manuelle Anfragen -> Release-Wunsch -> Command-Hold ->
 Live-Fenster -> Stille -> Max-Dwell``
@@ -114,9 +118,14 @@ class _Coord:
         connected: bool = False,
         poll_interval: int = 300,
         panel_talks: bool = False,
+        handshake_seconds: float = 0.0,
     ) -> None:
         self.clock = _Clock()
         self.panel_talks = panel_talks
+        # Was der Startup an Zeit kostet. Auf dem Fahrzeug sind das rund 25 s,
+        # und ein Double, das ihn gratis erledigt, kann gar nicht sehen, ob
+        # die Live-Zeit davor oder danach anläuft.
+        self.handshake_seconds = handshake_seconds
         COORD.asyncio = _FastForward(self.clock, self)
         self.hass = stubs.SimpleNamespace(loop=self.clock)
         self.poll_interval = poll_interval
@@ -130,6 +139,7 @@ class _Coord:
         self._manual_release_requested = False
         self._manual_requests = {}
         self._manual_operation = None
+        self._write_feedback = {}
         self._wake_event = asyncio.Event()
         self._connected_event = asyncio.Event()
         self._client = stubs.SimpleNamespace(connected=connected)
@@ -147,6 +157,10 @@ class _Coord:
         # der Platzhalter für alles, was nebenher läuft.
         self.on_tick = lambda _coord: None
         self.ticks = 0
+        # Der Abschluss-Schalter des geliehenen Schreibpfads (siehe
+        # ``_write_confirmed``) und der Platz für den Task, der ihn fährt.
+        self.write_done = asyncio.Event()
+        self.pending_task = None
 
     def tick(self) -> None:
         self.ticks += 1
@@ -161,7 +175,26 @@ class _Coord:
         pass
 
     async def _run_startup(self, _client) -> None:
-        """Steht für Registrierung und Discovery -- haben eigene Dateien."""
+        """Steht für Registrierung und Discovery -- haben eigene Dateien.
+
+        Er kostet hier aber Zeit, denn genau darum geht es beim Live-Modus:
+        ein Handshake, der die Uhr nicht weiterstellt, macht „vor dem
+        Handshake" und „nach dem Handshake" zum selben Zeitpunkt -- und jede
+        Prüfung darüber blind.
+        """
+        self.clock.now += self.handshake_seconds
+
+    async def _client_for_write(self):
+        """Der Link steht schon -- das Warten darauf hat eine eigene Datei."""
+        return self._client
+
+    async def _write_confirmed(self, _client, *_a, **_kw) -> None:
+        """Der Befehl selbst; seine Bestätigung prüft test_confirmed_writes.
+
+        Er dauert hier so lange, wie der Test ihn dauern lässt: ``write_done``
+        wird von einem Tick der Verweilschleife gesetzt.
+        """
+        await self.write_done.wait()
 
     async def _discover_params(self, _client) -> None:
         self.discovered += 1
@@ -176,6 +209,11 @@ class _Coord:
     async_end_manual_session = COORD.TrumaCoordinator.async_end_manual_session
     _finish_startup = COORD.TrumaCoordinator._finish_startup
     _wait_before_retry = COORD.TrumaCoordinator._wait_before_retry
+    # Geliehen statt nachgebaut: der Test unten fragt, was ein *echter*
+    # Befehl mit einem Release-Wunsch macht.
+    async_write_many = COORD.TrumaCoordinator.async_write_many
+    _hold_after_command = COORD.TrumaCoordinator._hold_after_command
+    _infer_action = staticmethod(COORD.TrumaCoordinator._infer_action)
 
 
 class _RunCoord:
@@ -261,6 +299,10 @@ def test_a_connected_request_holds_from_now() -> None:
 def test_a_disconnected_request_defers_the_clock() -> None:
     """Ein langsamer Handshake darf die Live-Zeit nicht auffressen."""
     coord = _Coord(connected=False)
+    # Der Nutzer hat eben noch „beenden" gedrückt. Der Wunsch muss sofort
+    # fallen, nicht erst nach dem Handshake: bis dahin kann noch eine
+    # Verweilschleife eines gewöhnlichen Polls laufen, und die läse ihn.
+    coord._manual_release_requested = True
 
     async def _drive() -> None:
         request = asyncio.ensure_future(coord.async_request_manual_session(2))
@@ -268,6 +310,9 @@ def test_a_disconnected_request_defers_the_clock() -> None:
         assert coord._manual_hold_until == 0.0, "Uhr lief schon vor dem Handshake"
         assert coord._manual_hold_request_minutes == 2, "die Dauer ging verloren"
         assert coord._manual_wake_pending is True, "die Schleife wird nicht geweckt"
+        assert coord._manual_release_requested is False, (
+            "der Wunsch stand noch, während die Anfrage auf den Link wartet"
+        )
         assert coord._wake_event.is_set()
         request.cancel()
         try:
@@ -281,24 +326,31 @@ def test_a_disconnected_request_defers_the_clock() -> None:
 def test_the_deferred_clock_starts_at_the_end_of_the_handshake() -> None:
     """Erst der geglückte Startup tritt das Fenster an -- und zwar ab dann.
 
-    Ohne diese Prüfung bliebe offen, ob die aufgeschobene Dauer überhaupt je
-    eingelöst wird; die Anfrage oben sieht nur, dass sie aufgeschoben wurde.
+    Der Handshake kostet hier die 25 s, die er auf dem Fahrzeug kostet, und
+    die Uhr läuft währenddessen mit. Genau das ist der Punkt: würde das
+    Fenster vor dem Startup angetreten, stünde es schon bei 220 statt bei
+    245, und der Nutzer bekäme 95 statt 120 Sekunden Live-Zeit. Ein Double,
+    dessen Startup keine Zeit kostet, kann diesen Unterschied nicht sehen.
     """
-    coord = _Coord(connected=False, panel_talks=True)
+    handshake = 25.0
+    coord = _Coord(connected=False, panel_talks=True, handshake_seconds=handshake)
     coord._manual_hold_request_minutes = 2
     coord._manual_wake_pending = True
-    # Der Verbindungsaufbau hat eine halbe Minute gekostet.
-    coord.clock.now = 130.0
+    start = coord.clock.now
 
     held = _dwell(coord)
 
     assert coord._manual_hold_request_minutes is None, "die Anfrage blieb stehen"
     assert coord._manual_wake_pending is False
-    assert held >= 120, (
-        f"nur {held}s live -- der Handshake wurde von der Live-Zeit abgezogen"
+    assert coord._manual_hold_until == start + handshake + 120, (
+        f"Fenster bis {coord._manual_hold_until} statt "
+        f"{start + handshake + 120} -- der Handshake wurde mitgerechnet"
     )
-    assert held <= 122, f"{held}s live statt der angeforderten 120"
-    assert coord._manual_hold_until == 130.0 + 120, coord._manual_hold_until
+    live = held - handshake
+    assert live >= 120, (
+        f"nur {live}s live -- der Handshake wurde von der Live-Zeit abgezogen"
+    )
+    assert live <= 122, f"{live}s live statt der angeforderten 120"
 
 
 def test_rejects_nonsense_durations() -> None:
@@ -400,6 +452,10 @@ def test_a_failed_refresh_does_not_cancel_a_newer_window() -> None:
 def test_ending_a_session_cancels_a_waiting_request() -> None:
     """Wer auf einen Handshake wartet, soll abbrechen können."""
     coord = _Coord(connected=False)
+    # Aus der vorigen Sitzung steht noch ein Fenster; der Link ist gerissen
+    # und die Anfrage wartet auf den neuen Handshake. Ohne dieses Fenster
+    # prüfte die Zusicherung unten wieder nur, dass 0.0 gleich 0.0 ist.
+    coord._manual_hold_until = coord.clock.now + 600
 
     async def _drive() -> None:
         request = asyncio.ensure_future(coord.async_request_manual_session(5))
@@ -416,7 +472,7 @@ def test_ending_a_session_cancels_a_waiting_request() -> None:
         else:
             raise AssertionError("die Anfrage meldete Erfolg")
 
-        assert coord._manual_hold_until == 0.0
+        assert coord._manual_hold_until == 0.0, "das Fenster blieb stehen"
         assert coord._manual_hold_request_minutes is None
         assert coord._manual_wake_pending is False
 
@@ -426,16 +482,167 @@ def test_ending_a_session_cancels_a_waiting_request() -> None:
 def test_ending_a_session_leaves_a_running_command_alone() -> None:
     """Auflegen mitten im Befehl wäre der schlimmste Zeitpunkt."""
     coord = _Coord(connected=True)
+    # Es läuft wirklich ein Fenster -- sonst prüfte die Zeile unten, dass
+    # eine Null eine Null bleibt.
+    coord._manual_hold_until = coord.clock.now + 600
+    assert coord.manual_session_active is True
     coord._writes_pending = 1
     coord._wake_event.set()
 
     asyncio.run(coord.async_end_manual_session())
 
-    assert coord._manual_hold_until == 0.0
+    assert coord._manual_hold_until == 0.0, "das Fenster blieb stehen"
+    assert coord.manual_session_active is False
     assert coord._manual_release_requested is True
     assert coord._writes_pending == 1, "der laufende Befehl wurde angetastet"
     assert coord._wake_event.is_set() is True, (
         "der Weck-Impuls des laufenden Befehls wurde gelöscht"
+    )
+
+
+def test_ending_a_session_that_never_ran_does_not_poison_the_next_poll() -> None:
+    """Der Knopf ist immer bedienbar -- auch wenn gar nichts läuft.
+
+    Er muss das sein: verschwände er, wenn BLE unten ist, wäre ausgerechnet
+    die Bedienung weg, mit der man aus dem Live-Modus wieder herauskommt.
+    Also wird er auch im gewöhnlichen Poll-Betrieb gedrückt, wo der Link
+    gerade zwischen zwei Abfragen liegt. Bliebe der Wunsch dann stehen,
+    schnitte er den *nächsten* Poll nach einer Sekunde ab, und der brächte
+    nur noch die Startup-Werte statt allem, was das Panel danach meldet.
+    """
+    coord = _Coord(connected=True, panel_talks=True)
+    assert coord.manual_session_active is False, "hier läuft absichtlich nichts"
+
+    asyncio.run(coord.async_end_manual_session())
+
+    assert coord._manual_release_requested is False, (
+        "der Wunsch blieb für den nächsten Poll liegen"
+    )
+
+    held = _dwell(coord)
+
+    assert held == COORD._POLL_MAX_DWELL, (
+        f"der nächste Poll dauerte {held}s statt {COORD._POLL_MAX_DWELL}s"
+    )
+
+
+def test_a_handshake_that_never_lands_is_reported_as_a_failure() -> None:
+    """Ein Sync, der nie zustande kam, darf nicht als „fertig" gelten.
+
+    Der Vorgangs-Sensor liest das Ergebnis dieser Koroutine. Verschluckte
+    sie den Zeitablauf, zeigte er „fertig" für eine Synchronisation, die
+    nie stattgefunden hat -- die Werte im Dashboard wären so alt wie zuvor.
+    """
+    coord = _Coord(connected=False)
+    was = COORD._WRITE_CONNECT_TIMEOUT
+    COORD._WRITE_CONNECT_TIMEOUT = 0.05
+    try:
+        asyncio.run(coord.async_request_manual_session(5))
+    except Exception as exc:  # noqa: BLE001
+        assert "did not answer in time" in str(exc), exc
+    else:
+        raise AssertionError("der ausgebliebene Handshake wurde als Erfolg verbucht")
+    finally:
+        COORD._WRITE_CONNECT_TIMEOUT = was
+
+    assert coord._manual_hold_until == 0.0, "das Fenster blieb stehen"
+    assert coord._manual_requests == {}, "der Abbruchkanal blieb offen"
+    assert coord._manual_hold_request_minutes is None, "die Dauer blieb stehen"
+    assert coord._manual_wake_pending is False, "der Weck-Impuls blieb stehen"
+
+
+# -- Ein Befehl widerruft den Release-Wunsch -------------------------------
+
+
+def test_a_command_revokes_a_release_wish() -> None:
+    """„Beenden", dann doch noch ein Befehl: der Nachlauf muss gelten.
+
+    Die Verweilschleife liest den Release-Wunsch *vor* dem Command-Hold --
+    aus gutem Grund, sonst ignorierte „Beenden" den Nutzer eine Minute lang
+    (siehe unten). Genau deshalb muss ein Befehl den Wunsch widerrufen: er
+    hinge sonst über dem Nachlauf und legte unmittelbar nach dem Befehl auf,
+    noch bevor das Gerät seine Folgeänderungen gemeldet hat.
+
+    Gemessen wird die Verweildauer, nicht das Flag: ob der Widerruf an der
+    richtigen Stelle steht, sagt nur der Link.
+    """
+    coord = _Coord(connected=True)
+    coord._bus.device(HEATER).param_meta["AirHeating.TgtTemp"] = {
+        "perm": 1, "min": 50, "max": 300,
+    }
+    coord._manual_release_requested = True
+
+    def _drive_the_command(c: _Coord) -> None:
+        if c.ticks == 1:
+            c.pending_task = asyncio.ensure_future(
+                c.async_write_many([(HEATER, "AirHeating", "TgtTemp", 210)])
+            )
+        elif c.ticks == 5:
+            c.write_done.set()
+
+    coord.on_tick = _drive_the_command
+
+    held = _dwell(coord)
+
+    assert coord.pending_task is not None and coord.pending_task.done()
+    assert held >= COORD._COMMAND_HOLD_SECONDS, (
+        f"nach {held}s aufgelegt -- der Release-Wunsch hat den "
+        f"{COORD._COMMAND_HOLD_SECONDS}s-Nachlauf des Befehls ausgehebelt"
+    )
+    assert coord._manual_release_requested is False, "der Wunsch blieb stehen"
+
+
+def test_a_deferred_window_is_not_cut_short_by_an_older_release_wish() -> None:
+    """Dieselben zwei Tastendrücke, diesmal ohne stehenden Link.
+
+    Die Anfrage wird bis zum Handshake aufgeschoben. Überlebte der alte
+    Wunsch ihn, legte die Verweilschleife in der ersten Sekunde des eben
+    angetretenen Fensters wieder auf -- der Nutzer bekäme genau einen Poll
+    statt seiner zwei Minuten.
+    """
+    handshake = 25.0
+    coord = _Coord(connected=False, panel_talks=True, handshake_seconds=handshake)
+    coord._manual_release_requested = True
+    coord._manual_hold_request_minutes = 2
+    coord._manual_wake_pending = True
+
+    held = _dwell(coord)
+
+    assert coord._manual_release_requested is False, "der alte Wunsch überlebte"
+    live = held - handshake
+    assert live >= 120, (
+        f"nur {live}s live -- der alte Release-Wunsch hat das aufgeschobene "
+        f"Fenster abgeschnitten"
+    )
+
+
+def test_a_manual_refresh_revokes_a_release_wish() -> None:
+    """„Beenden", dann „jetzt synchronisieren" bei stehender Verbindung.
+
+    Die frische Anfrage ist die jüngere Willensäußerung. Widerriefe sie den
+    alten Wunsch nicht, legte die Schleife auf, kaum dass der Refresh durch
+    ist -- das angeforderte Fenster wäre schon wieder zu.
+    """
+    coord = _Coord(connected=True, panel_talks=True)
+    coord._manual_release_requested = True
+
+    def _ask_again(c: _Coord) -> None:
+        if c.ticks == 1:
+            # Zwei Tastendrücke kurz hintereinander: „beenden" hat den Wunsch
+            # gesetzt, „jetzt synchronisieren" kommt eine Sekunde später.
+            c.pending_task = asyncio.ensure_future(
+                c.async_request_manual_session(2)
+            )
+
+    coord.on_tick = _ask_again
+
+    held = _dwell(coord)
+
+    assert coord.pending_task is not None and coord.pending_task.done()
+    assert coord.pending_task.exception() is None, coord.pending_task.exception()
+    assert held >= 120, (
+        f"nach {held}s aufgelegt -- der alte Release-Wunsch hat das eben "
+        f"angeforderte Fenster von 120s abgeschnitten"
     )
 
 
@@ -450,6 +657,9 @@ def test_a_release_waits_for_a_running_write() -> None:
     """Writes vor Release: sonst legt die Schleife mitten im Befehl auf."""
     coord = _Coord()
     coord._writes_pending = 1
+    # Das Fenster, das der Release-Zweig zu räumen hat. Stünde es schon auf
+    # 0.0, sagte die letzte Zusicherung nichts.
+    coord._manual_hold_until = coord.clock.now + 600
     coord._manual_release_requested = True
 
     def _finish_the_write(c: _Coord) -> None:
@@ -464,7 +674,9 @@ def test_a_release_waits_for_a_running_write() -> None:
         f"nach {held}s aufgelegt -- der Befehl lief bis Sekunde 5"
     )
     assert coord._manual_release_requested is False, "der Wunsch blieb liegen"
-    assert coord._manual_hold_until == 0.0
+    assert coord._manual_hold_until == 0.0, (
+        "der Release-Zweig hat das Fenster stehen lassen"
+    )
 
 
 def test_a_release_waits_for_a_running_manual_request() -> None:

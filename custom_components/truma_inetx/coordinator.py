@@ -419,10 +419,23 @@ class TrumaCoordinator(DataUpdateCoordinator[Bus]):
 
     async def async_end_manual_session(self) -> None:
         """Ein Live-Fenster freigeben, ohne einen laufenden Befehl abzuschneiden."""
+        # Nur freigeben, was es auch gibt: der Wunsch gilt genau einem
+        # laufenden Fenster. Der Knopf ist absichtlich immer bedienbar (er
+        # darf nicht verschwinden, wenn BLE unten ist), wird also auch im
+        # gewöhnlichen Poll-Betrieb gedrückt, wo der Link zwischen zwei
+        # Abfragen liegt. Bliebe der Wunsch dort stehen, schnitte er den
+        # *nächsten* Poll nach einer Sekunde ab -- gemessen 1 s statt 40 s
+        # bei durchredendem Panel, und der brächte nur noch die
+        # Startup-Werte. Eine wartende Anfrage braucht den Wunsch nicht: sie
+        # wird über ihr Event abgebrochen, und die gelöschte
+        # ``_manual_hold_request_minutes`` lässt den Startup gar kein Fenster
+        # erst antreten.
+        releasing = self.manual_session_active
         self._manual_hold_request_minutes = None
         self._manual_wake_pending = False
         self._manual_hold_until = 0.0
-        self._manual_release_requested = True
+        if releasing:
+            self._manual_release_requested = True
         for cancelled in self._manual_requests.values():
             cancelled.set()
         if not self._writes_pending:
