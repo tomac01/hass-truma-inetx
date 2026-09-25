@@ -276,6 +276,55 @@ class TrumaCoordinator(DataUpdateCoordinator[Bus]):
         self._write_feedback: dict[int, dict[tuple[int, str, str], int]] = {}
         # Loop-Zeitpunkt, bis zu dem nach einem Befehl nicht aufgelegt wird.
         self._command_hold_until = 0.0
+        # Dasselbe für ein angefordertes Live-Fenster. Gesetzt wird es erst in
+        # Task 9; die Verzögerungslogik fragt es schon hier ab, damit beide
+        # Fenster durch dieselbe Stelle laufen.
+        self._manual_hold_until = 0.0
+
+    def _hold_after_command(self) -> None:
+        """Den Link nach einem Befehl offen halten.
+
+        Absolut, nicht additiv: jeder Befehl setzt dasselbe Fenster neu ab
+        *jetzt*. Zehn schnelle Befehle ergeben also eine Minute Nachlauf, nicht
+        zehn -- aufaddiert hinge das Wohnmobil nach einer Bedienfolge minutenlang
+        am Panel, obwohl längst niemand mehr etwas erwartet.
+        """
+        self._command_hold_until = self.hass.loop.time() + _COMMAND_HOLD_SECONDS
+
+    @property
+    def manual_session_active(self) -> bool:
+        """Ob ein angefordertes Live-Fenster noch läuft.
+
+        Nur im Poll-Betrieb eine sinnvolle Frage: ein Dauerlink ist ohnehin
+        immer live.
+        """
+        return (
+            bool(self.poll_interval)
+            and self.hass.loop.time() < self._manual_hold_until
+        )
+
+    def _reconnect_delay(self, connected: bool, current: float) -> float:
+        """Die Wartezeit vor der nächsten Sitzung.
+
+        Ein Live-Modus-Fenster und ein Befehls-Nachlauf überleben einen
+        unerwarteten BLE-Abriss: solange eines von beiden läuft, wird schnell
+        neu verbunden statt im Poll-Takt oder mit gewachsenem Backoff.
+
+        ``current`` ist der gewachsene Backoff des Aufrufers; er gilt nur für
+        einen Versuch, der gar nicht erst zustande kam.
+        """
+        if (
+            self.manual_session_active
+            or self.hass.loop.time() < self._command_hold_until
+        ):
+            return _RECONNECT_DELAY_BASE
+        if connected and self.poll_interval:
+            # A completed poll is not a failure to back off from; the next one
+            # is simply due later.
+            return self.poll_interval
+        if connected:
+            return _RECONNECT_DELAY_BASE
+        return current
 
     async def _async_update_data(self) -> Bus:
         """Return the shared bus (updated by BLE notifications)."""
@@ -590,14 +639,12 @@ class TrumaCoordinator(DataUpdateCoordinator[Bus]):
             # link that just dropped should return fast); a failed attempt grows
             # it after the wait, so a persistently unreachable panel backs off
             # the shared adapter instead of hammering it.
-            if connected and self.poll_interval:
-                # A completed poll is not a failure to back off from; the next
-                # one is simply due later.
-                delay = self.poll_interval
-            elif connected:
-                delay = _RECONNECT_DELAY_BASE
+            delay = self._reconnect_delay(connected, delay)
+            if connected:
                 # A real connection means our address set is healthy; forget any
                 # past failures so a later reconnect starts from a clean slate.
+                # Auch nach einem Poll: dass der Link danach planmäßig fällt,
+                # macht die Adresse nicht schlechter.
                 self._avoid.clear()
             LOGGER.debug("Truma %s reconnecting in %ss", self.unique_id, delay)
             await self._wait_before_retry(delay)
@@ -1004,6 +1051,13 @@ class TrumaCoordinator(DataUpdateCoordinator[Bus]):
                     # Someone is mid-write; do not hang up under them.
                     started = self.hass.loop.time()
                     continue
+                now = self.hass.loop.time()
+                if now < self._command_hold_until:
+                    # Nachlauf nach einem Befehl: weder Stille noch die
+                    # Verweilgrenze beenden den Poll, solange das Fenster läuft.
+                    # ``started`` bleibt stehen, damit der Hold den Link nicht
+                    # über sein eigenes Ende hinaus offen hält.
+                    continue
                 quiet = self.hass.loop.time() - self._last_frame
                 if quiet >= _POLL_QUIET:
                     break
@@ -1267,9 +1321,7 @@ class TrumaCoordinator(DataUpdateCoordinator[Bus]):
                 self._writes_pending -= 1
                 # Auch nach einem Fehlschlag: der Nutzer soll sofort
                 # nachsteuern können, ohne auf den nächsten Poll zu warten.
-                self._command_hold_until = (
-                    self.hass.loop.time() + _COMMAND_HOLD_SECONDS
-                )
+                self._hold_after_command()
 
     async def _write_confirmed(
         self,

@@ -221,6 +221,9 @@ class _Coord:
     _write_confirmed = COORD.TrumaCoordinator._write_confirmed
     _await_feedback = COORD.TrumaCoordinator._await_feedback
     on_frame_value = COORD.TrumaCoordinator.on_frame_value
+    # Der Nachlauf, den jeder Schreibvorgang im ``finally`` absetzt -- geliehen
+    # und nicht nachgebaut, damit unten die echte Regel geprüft wird.
+    _hold_after_command = COORD.TrumaCoordinator._hold_after_command
     _feedback_satisfied = staticmethod(COORD.TrumaCoordinator._feedback_satisfied)
     _infer_action = staticmethod(COORD.TrumaCoordinator._infer_action)
 
