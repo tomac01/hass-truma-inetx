@@ -163,6 +163,11 @@ _ENABLED_STATES = (1, 2)
 # nicht additiv: zehn schnelle Befehle ergeben nicht zehn Minuten.
 _COMMAND_HOLD_SECONDS = 60  # seconds
 
+# Obergrenze für ein angefordertes Live-Fenster. Nicht als Komfortgrenze
+# gedacht, sondern gegen den Vertipper: eine Dauer, die aus einem Skript
+# kommt, soll das Fahrzeug nicht tagelang an einem Verbindungsplatz halten.
+_MANUAL_LIVE_MINUTES_MAX = 999
+
 
 class TrumaCoordinator(DataUpdateCoordinator[Bus]):
     """Hold the panel's bus and run the live BLE session."""
@@ -276,10 +281,27 @@ class TrumaCoordinator(DataUpdateCoordinator[Bus]):
         self._write_feedback: dict[int, dict[tuple[int, str, str], int]] = {}
         # Loop-Zeitpunkt, bis zu dem nach einem Befehl nicht aufgelegt wird.
         self._command_hold_until = 0.0
-        # Dasselbe für ein angefordertes Live-Fenster. Gesetzt wird es erst in
-        # Task 9; die Verzögerungslogik fragt es schon hier ab, damit beide
-        # Fenster durch dieselbe Stelle laufen.
+        # Dasselbe für ein angefordertes Live-Fenster.
         self._manual_hold_until = 0.0
+        # Eine Anfrage aus dem Dashboard kann den Poll-Betrieb wecken, ohne
+        # einen Parameter-Write vorzutäuschen. Die gewünschte Haltezeit
+        # beginnt erst nach dem Handshake, damit ein langsamer BLE-Aufbau die
+        # Live-Zeit des Nutzers nicht verbraucht.
+        self._manual_wake_pending = False
+        self._manual_hold_request_minutes: int | None = None
+        # Einweg-Wunsch "bitte auflegen". Die Verweilschleife liest ihn erst
+        # *nach* den Writes, damit ein laufender Befehl nicht abgeschnitten
+        # wird.
+        self._manual_release_requested = False
+        # token -> Event. Solange nicht leer, besitzt ein manueller
+        # Lesevorgang die Sitzung; das Event ist sein Abbruchkanal.
+        self._manual_requests: dict[int, asyncio.Event] = {}
+        # Das Token der jüngsten manuellen Anfrage. Ein spät scheiternder
+        # Vorgang erkennt daran, dass er nicht mehr der Besitzer des Fensters
+        # ist, und räumt dann nichts weg.
+        self._manual_operation: int | None = None
+        # Von der Number-Entität gesetzt, vom Sync-Button gelesen (Task 10).
+        self.manual_live_minutes = 0
 
     def _hold_after_command(self) -> None:
         """Den Link nach einem Befehl offen halten.
@@ -302,6 +324,112 @@ class TrumaCoordinator(DataUpdateCoordinator[Bus]):
             bool(self.poll_interval)
             and self.hass.loop.time() < self._manual_hold_until
         )
+
+    async def async_request_manual_session(self, minutes: int) -> None:
+        """Jetzt synchronisieren und den Poll-Betrieb optional offen halten.
+
+        ``minutes`` ist die Zeit, die der Link *nach* der Synchronisation noch
+        offen bleiben soll. 0 heißt genau einmal lesen -- nicht unendlich.
+        """
+        if (
+            isinstance(minutes, bool)
+            or not isinstance(minutes, int)
+            or not 0 <= minutes <= _MANUAL_LIVE_MINUTES_MAX
+        ):
+            raise HomeAssistantError(
+                f"Live mode duration must be a whole number from 0 to "
+                f"{_MANUAL_LIVE_MINUTES_MAX} minutes"
+            )
+
+        with self._operations.operation("sync") as token:
+            self._manual_operation = token
+            cancelled = asyncio.Event()
+            self._manual_requests[token] = cancelled
+            try:
+                await self._request_manual_session(minutes, cancelled)
+                if cancelled.is_set():
+                    raise HomeAssistantError("Manual refresh cancelled")
+            except (Exception, asyncio.CancelledError):
+                # Ein Refresh bei stehender Verbindung setzt sein Fenster vor
+                # dem Lesen. Ein Fehlschlag muss es freigeben -- darf aber eine
+                # neuere Anfrage nicht rückgängig machen.
+                if self._manual_operation == token:
+                    self._manual_hold_until = 0.0
+                raise
+            finally:
+                self._manual_requests.pop(token, None)
+                if self._manual_operation == token:
+                    self._manual_hold_request_minutes = None
+                    self._manual_wake_pending = False
+
+    async def _request_manual_session(
+        self, minutes: int, cancelled: asyncio.Event
+    ) -> None:
+        """Den Refresh unter dem Besitzer seines Vorgangs ausführen."""
+        client = self._client
+        if client is not None and client.connected and self._connected_event.is_set():
+            self._manual_release_requested = False
+            self._manual_hold_until = (
+                self.hass.loop.time() + minutes * 60
+                if self.poll_interval and minutes
+                else 0.0
+            )
+            # Der Startup hat die gewöhnlichen Parameter eben aufgefrischt.
+            # Bei bereits offener Verbindung auch die Sensoren fragen, die nur
+            # auf Anfrage messen.
+            before = self._bus.last_update
+            await self._discover_params(client)
+            await self._request_measurements(client)
+            if self._bus.last_update == before:
+                raise HomeAssistantError(
+                    "Truma refresh received no fresh panel parameters"
+                )
+            return
+
+        # Keine Verbindung: die Schleife wecken und die Dauer aufheben, bis
+        # der Handshake steht (siehe _finish_startup).
+        self._manual_hold_request_minutes = minutes
+        self._manual_wake_pending = True
+        self._manual_release_requested = False
+        self._connected_event.clear()
+        self._wake_event.set()
+        LOGGER.debug(
+            "Truma %s: manual session requested (%d minute live hold)",
+            self.unique_id,
+            minutes,
+        )
+        connected = asyncio.ensure_future(self._connected_event.wait())
+        stopped = asyncio.ensure_future(cancelled.wait())
+        try:
+            done, _ = await asyncio.wait(
+                {connected, stopped},
+                timeout=_WRITE_CONNECT_TIMEOUT,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if stopped in done:
+                raise HomeAssistantError("Manual refresh cancelled")
+            if connected not in done:
+                raise HomeAssistantError(
+                    "Truma panel did not answer in time for the manual refresh"
+                )
+        finally:
+            connected.cancel()
+            stopped.cancel()
+            await asyncio.gather(connected, stopped, return_exceptions=True)
+
+    async def async_end_manual_session(self) -> None:
+        """Ein Live-Fenster freigeben, ohne einen laufenden Befehl abzuschneiden."""
+        self._manual_hold_request_minutes = None
+        self._manual_wake_pending = False
+        self._manual_hold_until = 0.0
+        self._manual_release_requested = True
+        for cancelled in self._manual_requests.values():
+            cancelled.set()
+        if not self._writes_pending:
+            self._wake_event.clear()
+        # Die Poll-Verweilschleife prüft das einmal pro Sekunde, und zwar nach
+        # den Writes -- sie legt daher nie unter einem laufenden Befehl auf.
+        LOGGER.debug("Truma %s: manual live mode released", self.unique_id)
 
     def _reconnect_delay(self, connected: bool, current: float) -> float:
         """Die Wartezeit vor der nächsten Sitzung.
@@ -610,6 +738,11 @@ class TrumaCoordinator(DataUpdateCoordinator[Bus]):
         """Maintain the BLE session, reconnecting with exponential backoff."""
         delay = _RECONNECT_DELAY_BASE
         while not self._stop:
+            # Nur den Weck-Impuls verbrauchen. Die gewünschte Dauer bleibt
+            # offen, bis der Startup gelungen ist -- ein gescheiterter Anwahl-
+            # versuch muss aber trotzdem den Backoff respektieren, statt ohne
+            # Pause durchzudrehen.
+            self._manual_wake_pending = False
             connected = False
             try:
                 connected = await self._connect_and_run()
@@ -648,7 +781,9 @@ class TrumaCoordinator(DataUpdateCoordinator[Bus]):
                 self._avoid.clear()
             LOGGER.debug("Truma %s reconnecting in %ss", self.unique_id, delay)
             await self._wait_before_retry(delay)
-            if not connected:
+            if not connected and not self.manual_session_active:
+                # Im Live-Fenster wartet ein Mensch: dann lieber gleich wieder
+                # anklopfen als den Backoff verdoppeln.
                 delay = min(delay * 2, _RECONNECT_DELAY_MAX)
 
     def _note_attempt_failed(self) -> None:
@@ -675,16 +810,17 @@ class TrumaCoordinator(DataUpdateCoordinator[Bus]):
             self._kind_stale = self._last_kind == self._address_kind
 
     async def _wait_before_retry(self, delay: float) -> None:
-        """Sleep ``delay`` seconds; wake early on stop, or for a pending write.
+        """Sleep ``delay`` seconds; wake early on stop, write or live request.
 
-        ``_writes_pending`` is the source of truth and ``_wake_event`` only the
-        nudge, so a write that lands in the gap between sessions cannot be
-        missed by clearing the event at the wrong moment.
+        ``_writes_pending`` und ``_manual_wake_pending`` sind die Wahrheit,
+        ``_wake_event`` ist nur der Anstoß: ein Befehl oder eine Live-Anfrage,
+        die in die Lücke zwischen zwei Sitzungen fällt, kann so nicht dadurch
+        verlorengehen, dass das Event im falschen Moment gelöscht wird.
         """
-        if self._writes_pending:
+        if self._writes_pending or self._manual_wake_pending:
             return
         self._wake_event.clear()
-        if self._writes_pending:  # set while we were clearing
+        if self._writes_pending or self._manual_wake_pending:  # set while clearing
             return
         stop = asyncio.ensure_future(self._stop_event.wait())
         wake = asyncio.ensure_future(self._wake_event.wait())
@@ -1014,6 +1150,18 @@ class TrumaCoordinator(DataUpdateCoordinator[Bus]):
         (the connection is up, so the caller resets the backoff).
         """
         await self._run_startup(client)
+        if self._manual_hold_request_minutes is not None:
+            # Erst jetzt läuft die Live-Zeit an: der Handshake kostet auf dem
+            # Fahrzeug rund 25 s, und die gehören nicht dem Nutzer weggerechnet.
+            minutes = self._manual_hold_request_minutes
+            self._manual_hold_request_minutes = None
+            self._manual_wake_pending = False
+            self._manual_release_requested = False
+            self._manual_hold_until = (
+                self.hass.loop.time() + minutes * 60
+                if self.poll_interval and minutes
+                else 0.0
+            )
         # Every device on the bus has now been asked to describe itself, so
         # whatever has not named itself by here is not going to: anything
         # waiting for a device's identity may stop waiting (see
@@ -1041,16 +1189,33 @@ class TrumaCoordinator(DataUpdateCoordinator[Bus]):
         # Startup just delivered frames, so seed the watchdog from now.
         self._last_frame = self.hass.loop.time()
 
+        # Auch der Poll-Zweig misst nach, solange ein Live-Fenster läuft.
+        next_measure = self.hass.loop.time() + _MEASURE_INTERVAL
+
         if self.poll_interval:
             # Poll mode: the reading is in hand, so let the link go and free the
             # connection slot. Wait only until the panel stops talking.
             started = self.hass.loop.time()
+            # Die Reihenfolge dieser Prüfungen ist bindend, und jede
+            # Vertauschung hat ein Gesicht:
+            #   Writes/manuelle Anfragen -> Release-Wunsch -> Command-Hold ->
+            #   Live-Fenster -> Stille -> Verweilgrenze
+            # Der Release vor den Writes legte mitten im Befehl auf; der
+            # Command-Hold vor dem Release ließe "Live-Modus beenden" eine
+            # Minute lang wirkungslos; das Live-Fenster vor dem Command-Hold
+            # ließe den Stall-Watchdog den Nachlauf abreißen, der gerade für
+            # ein schweigendes Gerät da ist.
             while not self._stop and client.connected:
                 await asyncio.sleep(1)
-                if self._writes_pending:
-                    # Someone is mid-write; do not hang up under them.
+                if self._writes_pending or self._manual_requests:
+                    # Ein Befehl oder ein manueller Lesevorgang besitzt die
+                    # Sitzung, bis er fertig ist.
                     started = self.hass.loop.time()
                     continue
+                if self._manual_release_requested:
+                    self._manual_release_requested = False
+                    self._manual_hold_until = 0.0
+                    break
                 now = self.hass.loop.time()
                 if now < self._command_hold_until:
                     # Nachlauf nach einem Befehl: weder Stille noch die
@@ -1058,7 +1223,23 @@ class TrumaCoordinator(DataUpdateCoordinator[Bus]):
                     # ``started`` bleibt stehen, damit der Hold den Link nicht
                     # über sein eigenes Ende hinaus offen hält.
                     continue
-                quiet = self.hass.loop.time() - self._last_frame
+                if self.manual_session_active:
+                    # Live-Fenster: der Link bleibt, auch wenn niemand redet.
+                    # Beenden kann ihn nur der Stall-Watchdog -- die Stille
+                    # ist hier ja gerade kein Grund aufzulegen.
+                    if now >= next_measure:
+                        next_measure = now + _MEASURE_INTERVAL
+                        await self._request_measurements(client)
+                    if now - self._last_frame > _DATA_STALL_TIMEOUT:
+                        LOGGER.warning(
+                            "Truma %s: no data for %ss during manual live mode; "
+                            "reconnecting",
+                            self.unique_id,
+                            _DATA_STALL_TIMEOUT,
+                        )
+                        break
+                    continue
+                quiet = now - self._last_frame
                 if quiet >= _POLL_QUIET:
                     break
                 if self.hass.loop.time() - started >= _POLL_MAX_DWELL:
@@ -1077,7 +1258,6 @@ class TrumaCoordinator(DataUpdateCoordinator[Bus]):
 
         # Connected mode: hold the link, watching for a data stall and keeping
         # the on-demand sensors measuring.
-        next_measure = self.hass.loop.time() + _MEASURE_INTERVAL
         while not self._stop and client.connected:
             await asyncio.sleep(1)
             now = self.hass.loop.time()
@@ -1125,6 +1305,16 @@ class TrumaCoordinator(DataUpdateCoordinator[Bus]):
             raise HomeAssistantError(message) from exc
         except session.StartupFailed as exc:
             raise HomeAssistantError(str(exc)) from exc
+
+    async def _discover_params(self, client: TrumaBleClient) -> None:
+        """Jedes Busgerät nach seinen aktuellen Werten fragen; siehe session.py.
+
+        Dasselbe, was der Startup als Schritt 4 tut -- hier für eine bereits
+        offene Verbindung, die niemand dafür neu aufbauen soll.
+        """
+        await session.discover_params(
+            client, self._bus, self.unique_id, self.hass.loop.time
+        )
 
     async def _request_measurements(self, client: TrumaBleClient) -> None:
         """Ask the on-demand sensors for a fresh reading; see session.py."""
@@ -1288,6 +1478,10 @@ class TrumaCoordinator(DataUpdateCoordinator[Bus]):
             # auflegt, und ein früh freigegebenes Flag ließe sie zwischen
             # Client-Holen und Senden auflegen.
             self._writes_pending += 1
+            # Ein Befehl widerruft einen Release-Wunsch: wer gerade bedient,
+            # will die Verbindung, auch wenn er eben noch "beenden" gedrückt
+            # hat.
+            self._manual_release_requested = False
             # Das eigene Buch dieses Vorgangs. Ein zweiter Vorgang, der
             # währenddessen anläuft, legt sein eigenes daneben und lässt
             # dieses unberührt.

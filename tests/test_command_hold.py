@@ -108,6 +108,12 @@ class _Coord:
         self._bus = BUS.Bus()
         self._command_hold_until = 0.0
         self._manual_hold_until = 0.0
+        # Der Live-Modus hat eine eigene Datei (test_live_mode.py); hier steht
+        # er nur still herum, damit die Verweilschleife laufen kann.
+        self._manual_hold_request_minutes = None
+        self._manual_wake_pending = False
+        self._manual_release_requested = False
+        self._manual_requests = {}
         self._writes_pending = 0
         self._last_frame = 0.0
         self._last_kind = None
