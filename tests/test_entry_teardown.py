@@ -283,8 +283,13 @@ def test_a_setup_that_fails_late_stops_the_session_it_started() -> None:
         ENTRY._async_finish_setup = _boom
         ENTRY._async_register_card = _returning(None)
         try:
+            # Der Update-Listener haengt am Entry, nicht an dieser Pruefung:
+            # tests/test_options_reload.py nagelt ihn fest, hier reicht es,
+            # dass die beiden Aufrufe ins Leere laufen duerfen.
             entry = SimpleNamespace(data={"address": "AA:BB:CC:DD:EE:FF"},
-                                    runtime_data=None)
+                                    runtime_data=None,
+                                    add_update_listener=lambda _l: (lambda: None),
+                                    async_on_unload=lambda _u: None)
             raised = None
             try:
                 await ENTRY.async_setup_entry(_hass(unload_ok=True), entry)

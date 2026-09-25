@@ -8,7 +8,7 @@ from homeassistant.components import bluetooth
 from homeassistant.components.frontend import add_extra_js_url
 from homeassistant.components.http import StaticPathConfig
 from homeassistant.const import CONF_ADDRESS, EVENT_HOMEASSISTANT_STOP, Platform
-from homeassistant.core import Event, HomeAssistant
+from homeassistant.core import Event, HomeAssistant, callback
 from homeassistant.helpers import device_registry as dr
 from homeassistant.loader import async_get_integration
 
@@ -69,6 +69,23 @@ async def _async_register_card(hass: HomeAssistant) -> None:
     add_extra_js_url(hass, f"{CARD_URL}?v={integration.version}")
 
 
+async def _async_update_listener(hass: HomeAssistant, entry: TrumaConfigEntry) -> None:
+    """Optionen neu einlesen, indem der Eintrag neu geladen wird.
+
+    Der Coordinator liest ``poll_interval`` nur beim Betreten seiner
+    Session-Schleife. Ohne diesen Reload bliebe eine Umstellung zwischen
+    Dauerverbindung und Poll-Betrieb wirkungslos, bis die Verbindung von
+    selbst abreißt — im Dauerbetrieb also womöglich tagelang.
+    """
+    await hass.config_entries.async_reload(entry.entry_id)
+
+
+@callback
+def _async_register_update_listener(entry: TrumaConfigEntry) -> None:
+    """Den Listener anmelden und fürs Entladen vormerken."""
+    entry.async_on_unload(entry.add_update_listener(_async_update_listener))
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: TrumaConfigEntry) -> bool:
     """Set up Truma iNet X from a config entry."""
     await _async_register_card(hass)
@@ -94,6 +111,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: TrumaConfigEntry) -> boo
     await coordinator.async_config_entry_first_refresh()
     await coordinator.async_start()
     entry.runtime_data = coordinator
+    _async_register_update_listener(entry)
 
     # Everything past this point runs with a live session behind it, and Home
     # Assistant does not call async_unload_entry for an entry whose setup
