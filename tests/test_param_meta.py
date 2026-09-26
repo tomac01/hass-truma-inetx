@@ -59,7 +59,7 @@ class _Coord:
     """Carries only what ``_on_frame`` touches."""
 
     hass = types.SimpleNamespace(loop=types.SimpleNamespace(time=lambda: 0.0))
-    unique_id = "Truma iNetX-FFB4D1"
+    unique_id = "Truma iNetX-BBCCDD"
 
     _client = None
 

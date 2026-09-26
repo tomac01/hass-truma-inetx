@@ -37,12 +37,22 @@ eigenen Prüfaufwand -- eine Adresse trägt oft eine Form, die der Test braucht
 (eine RPA muss oben ``01`` stehen haben, eine Identitätsadresse muss auf den
 Namenssuffix des Panels enden), und ein blind ersetzter Wert prüft danach
 etwas anderes. Die Liste wächst deshalb Datei für Datei. Wer eine umstellt,
-trägt sie hier nach; zuletzt geschehen am 2026-09-26, zunächst für
-``test_no_route_issue.py`` und ``test_device_from_bluez.py``, in denen ein
-Review echte Adressen des Panels gefunden hatte, und im selben Durchgang für
+trägt sie hier nach; zuletzt geschehen am 2026-09-26, in mehreren Durchgängen:
+zunächst ``test_no_route_issue.py`` und ``test_device_from_bluez.py``, in denen
+ein Review echte Adressen des Panels gefunden hatte, dann
 ``test_pairing_transport_dispatch.py``, ``test_pairing_rotation.py``,
-``test_pairing_local_fallback.py`` und ``test_bus_dump_tool.py``. Damit stehen
-acht Dateien auf der Liste; Fundstellen in weiteren Testdateien sind offen.
+``test_pairing_local_fallback.py``, ``test_bus_dump_tool.py``,
+``test_config_flow_options.py`` und ``test_bus_range_edges.py``, und zuletzt
+``test_panel2_discovery.py`` und ``test_passive_scan_discovery.py``, die beide
+dieselbe echte RPA trugen -- die letzten zwei vollständigen echten Adressen im
+Verzeichnis. ``test_entry_teardown.py`` kommt mit hinzu, weil es nach demselben
+Durchgang nur noch eine Platzhalteradresse führt. Damit stehen dreizehn Dateien
+auf der Liste.
+
+Nicht aufgenommen, obwohl adressfrei: ``test_param_discovery.py``. Seine
+Messprotokolle nennen Uhrzeiten der Form ``HH:MM``, die von zwei Bytepaaren
+nicht zu unterscheiden sind (siehe unten). Die Datei führt keine Adresse, also
+gewinnt die Aufnahme nichts, was den Umbau ihrer Prosa aufwöge.
 
 Was dieser Test NICHT sieht: eine Adresse, die nicht mit Doppelpunkten
 geschrieben ist. BlueZ schreibt sie in seinen D-Bus-Pfaden mit Unterstrichen
@@ -50,6 +60,18 @@ geschrieben ist. BlueZ schreibt sie in seinen D-Bus-Pfaden mit Unterstrichen
 Prüfung -- wer einen einträgt, prüfe die Bytes selbst. Wo eine Datei auf der
 Liste solche Pfade braucht, leitet sie sie darum aus der Adresskonstante ab,
 statt sie ein zweites Mal hinzuschreiben.
+
+Was dieser Test ebenso NICHT sieht: den Namenssuffix eines Panels. Es heißt
+``Truma iNetX-XXXXXX``, und diese sechs Hexzeichen sind die letzten drei Bytes
+seiner Identitätsadresse -- nur eben ohne Doppelpunkte, also greift das Muster
+oben nicht. Zusammen mit der öffentlichen OUI des Herstellers liegt damit ein
+großer Teil einer echten Adresse offen; deshalb sind auch die Suffixe am
+2026-09-26 Platzhalter geworden: ``BBCCDD`` für das Panel des Besitzers,
+``556677`` für das zweite, fremde Panel aus #6. Wer einen Suffix ändert, prüfe
+die Adressen derselben Datei mit -- ``bt.address_kind`` erkennt eine
+Identitätsadresse ausschließlich daran, dass der Name auf ihre letzten sechs
+Hexzeichen endet, und ein allein geänderter Suffix macht den Test am falschen
+Ende grün.
 
 Und umgekehrt: Eine Uhrzeit der Form ``HH:MM:SS`` ist von drei Bytepaaren
 nicht zu unterscheiden und schlägt hier an. Das ist kein Fehlalarm, den man
@@ -87,6 +109,9 @@ GUARDED = (
     "test_bus_dump_tool.py",
     "test_config_flow_options.py",
     "test_bus_range_edges.py",
+    "test_panel2_discovery.py",
+    "test_passive_scan_discovery.py",
+    "test_entry_teardown.py",
 )
 
 # Bytes, die als Platzhalter durchgehen: doppelte Ziffern und doppelte

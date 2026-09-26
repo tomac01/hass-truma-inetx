@@ -14,7 +14,7 @@ original panel puts on air, while a Panel 2 advertises a third, fc310006.
 
 Both are now settled by an nRF Connect capture of a Panel 2 (hardware 1.4,
 firmware 3.5.38.1). It advertises one service, fc310006, manufacturer data
-under Truma's company ID 0x0c73 -- and the name ``Truma iNetX-5770EB``, which
+under Truma's company ID 0x0c73 -- and the name ``Truma iNetX-<suffix>``, which
 does still carry the prefix. So the renamed-panel case is hypothetical rather
 than live; it is kept below because nothing guarantees the next generation
 keeps the prefix, and the first word of the UUID has already moved once. What
@@ -57,11 +57,17 @@ import stubs  # noqa: E402
 
 SRC = Path(__file__).resolve().parents[1] / "custom_components" / "truma_inetx"
 
+# Erfundene Namen: die Suffixe stammen aus dem Platzhalter-Vorrat, den
+# ``test_placeholder_addresses.py`` für Adressbytes zulässt. Welches Panel
+# gemessen wurde, sagt die Ausgabenummer -- der Suffix trägt hier nichts.
+# PANEL_1 und PANEL_2 bekommen verschiedene Platzhalter, weil es zwei
+# verschiedene Geräte sind und die Datei genau das auseinanderhält.
+#
 # The panel this integration was written against.
-PANEL_1 = "Truma iNetX-FFB4D1"
+PANEL_1 = "Truma iNetX-BBCCDD"
 # What a Panel 2 actually calls itself, from the nRF Connect capture in issue
 # #6: the prefix survived the hardware generation, the UUID did not.
-PANEL_2 = "Truma iNetX-5770EB"
+PANEL_2 = "Truma iNetX-556677"
 # A panel that drops the prefix. Hypothetical -- no such panel has been seen --
 # and the point is that discovery must not depend on guessing this string.
 PANEL_RENAMED = "Truma iNet X Panel 2-A1B2C3"
@@ -74,7 +80,18 @@ PANEL2_ADVERT_SERVICE_UUID = "fc310006-f3b2-11e8-8eb2-f2801f1b9fd1"
 # renumbering: matching keys on the base, so this must work untouched.
 UNSEEN_TRUMA_UUID = "fc31beef-f3b2-11e8-8eb2-f2801f1b9fd1"
 
-RPA = "62:4A:BD:AD:73:5D"
+# Erfundene RPA: jedes Byte stammt aus den Platzhalter-Bytes, die
+# ``test_placeholder_addresses.py`` zulässt. Ihre Form bleibt trotzdem
+# bedeutungstragend -- wer sie ändert, ändert, was diese Datei prüft:
+#
+# * Die oberen zwei Bits des ersten Bytes sind ``01`` (0x44), also bleibt
+#   sie eine Resolvable Private Address -- die Adresse, die Home Assistant
+#   anstelle eines fehlenden Namens einsetzt, und genau darum geht es unten.
+# * Sie darf NICHT auf den Namenssuffix eines der Panels oben enden:
+#   ``bt.address_kind`` erkennt eine Identitätsadresse allein daran, und
+#   ``advert_name`` soll diesen Wert als Adresse verwerfen, nicht als Namen
+#   durchlassen.
+RPA = "44:55:66:77:88:99"
 
 
 def _mod(name: str, **attrs):
@@ -308,7 +325,9 @@ def test_an_address_is_not_a_name() -> None:
     # and that reaches us whenever the object came from BlueZ rather than from
     # Home Assistant's own scanner. Measured on the van (2026-09-18): it went
     # straight through a test written against the colon form, and the config
-    # entry was keyed "4D-6B-5F-62-51-68" -- a private address that rotates.
+    # entry was keyed on the dash form of a private address that rotates.
+    # Der gemessene Wert stand hier einmal im Klartext -- raus, weil die Form
+    # die Aussage trägt und der Guard die Bindestrich-Form nicht sieht.
     assert BT.advert_name(_Info(name=RPA.replace(":", "-"), address=RPA)) is None
     assert BT.advert_name(_Info(name=RPA.replace(":", ""), address=RPA)) is None
     assert BT.advert_name(_Info(name=RPA.replace(":", "_"), address=RPA)) is None
@@ -316,7 +335,7 @@ def test_an_address_is_not_a_name() -> None:
     # this function's job to say so -- only to refuse the address it was given.
     assert BT.advert_name(_Info(name="AA-BB-CC-DD-EE-FF", address=RPA)) is not None
     # A name is not reduced to the hex it happens to contain.
-    assert BT.advert_name(_Info(name="Truma iNetX-FFB4D1", address=RPA)) is not None
+    assert BT.advert_name(_Info(name="Truma iNetX-BBCCDD", address=RPA)) is not None
     assert BT.advert_name(_Info(name="ABCDEF", address=RPA)) is not None
 
 

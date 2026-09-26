@@ -72,7 +72,7 @@ COORD.close_link = _close_link
 # relative imports in it resolve against truma_pkg either way.
 ENTRY = stubs.load("__init__")
 
-PANEL = "Truma iNetX-FFB4D1"
+PANEL = "Truma iNetX-BBCCDD"
 
 
 class _Link:

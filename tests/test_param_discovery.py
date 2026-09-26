@@ -123,7 +123,7 @@ class _Coord:
     """Carries only what the methods under test touch."""
 
     hass = types.SimpleNamespace(loop=types.SimpleNamespace(time=lambda: 0.0))
-    unique_id = "Truma iNetX-FFB4D1"
+    unique_id = "Truma iNetX-BBCCDD"
     # The registration response is handed the transport so it can record the
     # address the panel assigned; the fake client below is created per test.
     _client = None

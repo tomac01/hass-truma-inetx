@@ -110,7 +110,7 @@ class _Client:
 class _Coord:
     """Ein Coordinator, der nur den Live-Modus-Pfad trägt."""
 
-    unique_id = "Truma iNetX-FFB4D1"
+    unique_id = "Truma iNetX-BBCCDD"
 
     def __init__(
         self,
@@ -223,7 +223,7 @@ class _RunCoord:
     zeigen, wie sie sich zwischen zwei Fehlversuchen verhält.
     """
 
-    unique_id = "Truma iNetX-FFB4D1"
+    unique_id = "Truma iNetX-BBCCDD"
     poll_interval = 300
 
     def __init__(self, rounds: int = 4) -> None:

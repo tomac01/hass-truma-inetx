@@ -158,7 +158,7 @@ class _Client:
 class _Coord:
     """Nur das, was der Schreibpfad anfasst."""
 
-    unique_id = "Truma iNetX-FFB4D1"
+    unique_id = "Truma iNetX-BBCCDD"
     poll_interval = 300
 
     def __init__(self, responses, *, source=HEATER, answer_from=0,

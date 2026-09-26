@@ -110,7 +110,7 @@ class _FastAsyncio:
 class _Coord:
     """Carries only what ``_on_frame`` and ``device_info`` touch."""
 
-    unique_id = "Truma iNetX-FFB4D1"
+    unique_id = "Truma iNetX-BBCCDD"
     last_update_success = True
     # Which kind of address this host connects on; the download reports it, so
     # a coordinator that never ran a session has to answer "not known yet".

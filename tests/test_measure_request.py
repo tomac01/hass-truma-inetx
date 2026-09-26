@@ -178,7 +178,7 @@ class _Client:
 class _Coord:
     """Carries only what the methods under test touch."""
 
-    unique_id = "Truma iNetX-FFB4D1"
+    unique_id = "Truma iNetX-BBCCDD"
     poll_interval = 0
     _client = None
 

@@ -66,12 +66,23 @@ import stubs  # noqa: E402
 
 SRC = Path(__file__).resolve().parents[1] / "custom_components" / "truma_inetx"
 
-PANEL = "Truma iNetX-FFB4D1"
+PANEL = "Truma iNetX-BBCCDD"
 # What the panel puts on air in the capture above: one service UUID, no name.
 SERVICE_UUID = "fc310002-f3b2-11e8-8eb2-f2801f1b9fd1"
 # A resolvable private address, which is all Home Assistant has to call the
 # panel while no scan response has arrived.
-RPA = "62:4A:BD:AD:73:5D"
+#
+# Erfundene Adresse: jedes Byte stammt aus den Platzhalter-Bytes, die
+# ``test_placeholder_addresses.py`` zulässt. Ihre Form bleibt trotzdem
+# bedeutungstragend -- wer sie ändert, ändert, was diese Datei prüft:
+#
+# * Die oberen zwei Bits des ersten Bytes sind ``01`` (0x44), also bleibt
+#   sie eine Resolvable Private Address -- genau der Fall, um den es hier
+#   geht.
+# * Sie darf NICHT auf den Namenssuffix von ``PANEL`` enden. ``bt.address_kind``
+#   erkennt eine Identitätsadresse allein daran, und die Prüfungen unten
+#   leben davon, dass dieser Wert eine rotierende Adresse ist und kein Name.
+RPA = "44:55:66:77:88:99"
 
 
 def _mod(name: str, **attrs):
@@ -359,7 +370,7 @@ def test_a_bonded_panel_is_keyed_on_the_name_bluez_kept() -> None:
     Measured on the van (2026-09-18): the bond completed, and from that moment
     the panel answered no scan request at all -- three full active windows, not
     one response -- while ``/var/lib/bluetooth/<adapter>/<addr>/info`` held
-    ``Name=Truma iNetX-FFB4D1`` the whole time. Home Assistant never passes it
+    ``Name=Truma iNetX-BBCCDD`` the whole time. Home Assistant never passes it
     on: advertisements reach it over an MGMT side channel carrying raw AD
     bytes, so the BlueZ object is never consulted.
     """

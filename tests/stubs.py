@@ -520,7 +520,7 @@ class FakeCoordinator:
     coordinator's, and tests/test_device_params.py drives the real one.
     """
 
-    unique_id = "Truma iNetX-FFB4D1"
+    unique_id = "Truma iNetX-BBCCDD"
 
     def __init__(self, bus) -> None:
         self.data = bus
