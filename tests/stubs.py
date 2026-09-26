@@ -236,6 +236,7 @@ def install_homeassistant() -> None:
         ATTR_TEMPERATURE="temperature",
         CONF_ADDRESS="address",
         CONF_NAME="name",
+        EVENT_HOMEASSISTANT_STOP="homeassistant_stop",
         PERCENTAGE="%",
         EntityCategory=EntityCategory,
         Platform=Platform,
