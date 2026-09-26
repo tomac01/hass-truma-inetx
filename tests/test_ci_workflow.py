@@ -24,23 +24,34 @@ das ist statisch sicher erkennbar und spart einen CI-Durchlauf.
 
 Was der Test festnagelt:
 
-1. der nackte Schritt globt weiterhin, statt Dateien aufzuzählen, startet die
-   gefundenen Dateien auch wirklich, behält ihren Fehlschlag und bricht ab,
-   wenn der Glob nichts trifft; kein Schritt trägt ``continue-on-error``,
-2. jede Datei ``tests/test_*.py`` läuft entweder im Glob oder in einem eigenen
+1. der nackte Schritt globt weiterhin, statt Dateien aufzuzählen -- und das
+   nicht nur dem Text nach: sein ``run``-Skript wird aus der YAML gezogen und
+   in einem Wegwerf-Verzeichnis gegen Attrappen ausgeführt. Es muss die
+   gefundenen Dateien wirklich starten, die Liste ``needs_library`` wirklich
+   überspringen, einen Fehlschlag wirklich durchreichen und wirklich abbrechen,
+   wenn der Glob nichts trifft,
+2. weder ein Schritt noch der Job selbst trägt ``continue-on-error`` oder
+   ``if:``. Beides macht aus einem roten Test eine grüne CI, ``if:`` sogar,
+   ohne den Test überhaupt zu starten; auf Job-Ebene hebelt es alle Schritte
+   auf einmal aus,
+3. ein Schritt, der eine einzelne Datei startet, ist genau dieser Aufruf:
+   ``run: python3 tests/<datei>.py`` bzw. ``run: node tests/<datei>.cjs``.
+   Kein ``echo`` davor, kein ``|| true`` dahinter -- sonst stünde der Schritt
+   da, ohne je rot werden zu können,
+4. jede Datei ``tests/test_*.py`` läuft entweder im Glob oder in einem eigenen
    Schritt, jede Datei ``tests/test_*.cjs`` in einem eigenen Node-Schritt,
-3. die ``needs_library``-Liste und die eigenen Python-Schritte nennen genau
+5. die ``needs_library``-Liste und die eigenen Python-Schritte nennen genau
    dieselben Dateien -- eine Datei mehr auf der Liste heißt: läuft nie, eine
    Datei mehr an Schritten heißt: läuft zweimal, davon einmal nackt,
-4. jeder Eintrag der Liste greift auch wirklich, gemessen an der
+6. jeder Eintrag der Liste greift auch wirklich, gemessen an der
    Teilstring-Logik der Shell (``case "$needs_library" in *"$base"*``) -- ein
    Tippfehler oder ein abgeschnittener Name steht sonst wirkungslos da,
-5. jede Datei mit direktem ``import cbor2``/``import voluptuous`` steht auf
+7. jede Datei mit direktem ``import cbor2``/``import voluptuous`` steht auf
    der Liste,
-6. der nackte Schritt und der Node-Schritt laufen vor dem ersten
+8. der nackte Schritt und der Node-Schritt laufen vor dem ersten
    ``pip install`` -- nur so beweist der Durchlauf, dass sie ohne
    Drittbibliothek auskommen,
-7. jeder eigene Python-Schritt läuft nach einem ``pip install``, und wer
+9. jeder eigene Python-Schritt läuft nach einem ``pip install``, und wer
    ``cbor2`` importiert, nach dem ``pip install`` von ``cbor2``.
 
 Nicht abgedeckt: ob ein Test inhaltlich etwas prüft. Hier geht es allein
@@ -53,7 +64,9 @@ from __future__ import annotations
 
 import ast
 import re
+import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -66,11 +79,33 @@ WORKFLOW = ROOT / ".github" / "workflows" / "validate.yml"
 # Bibliotheken, die der nackte Schritt nicht hat.
 THIRD_PARTY = ("cbor2", "voluptuous")
 
-RUN_PY = re.compile(r"python3 tests/(test_[A-Za-z0-9_]+\.py)")
-RUN_NODE = re.compile(r"\bnode tests/(test_[A-Za-z0-9_]+\.cjs)")
+# Ein Einzelschritt startet eine Datei nur dann, wenn die ganze ``run``-Zeile
+# aus genau diesem Aufruf besteht. Ein Teilstring-Treffer würde ``echo python3
+# tests/x.py`` und ``python3 tests/x.py || true`` als "läuft" durchgehen lassen
+# -- beides ist immer grün und prüft nichts.
+RUN_PY = re.compile(r"^ *(?:- )?run: python3 tests/(test_[A-Za-z0-9_]+\.py) *$", re.M)
+RUN_NODE = re.compile(r"^ *(?:- )?run: node tests/(test_[A-Za-z0-9_]+\.cjs) *$", re.M)
+# Und hier die Gegenrichtung: jede Erwähnung einer Testdatei, wie verpackt auch
+# immer. Was erwähnt, aber nicht sauber gestartet wird, fällt damit auf.
+NAMES_A_TEST_FILE = re.compile(r"tests/(test_[A-Za-z0-9_]+\.(?:py|cjs))")
 PIP_INSTALL = re.compile(r"pip install ([^\n]+)")
+# Schlüssel auf Schritt- bzw. Job-Ebene -- Einrückung 8 bzw. 4. Die Shell-Zeilen
+# in den ``run``-Blöcken stehen auf 10 und werden davon nicht erfasst.
+STEP_KEY = re.compile(r"^(?:      - |        )([A-Za-z0-9_-]+):", re.M)
+JOB_KEY = re.compile(r"^    ([A-Za-z0-9_-]+):", re.M)
+# Schlüssel, die einen Schritt oder Job lautlos wirkungslos machen.
+MUFFLERS = frozenset({"continue-on-error", "if"})
 # Der Glob-Schritt: daran erkennen wir ihn, und genau das soll er bleiben.
 GLOB_LOOP = "for path in tests/test_*.py"
+
+# Attrappen für den Verhaltenstest des Glob-Schritts. Die grüne schreibt ihren
+# Namen mit, damit sich belegen lässt, dass sie wirklich gelaufen ist.
+DUMMY_GREEN = (
+    "import pathlib, sys\n"
+    "with pathlib.Path('ran.txt').open('a') as fh:\n"
+    "    fh.write(pathlib.Path(sys.argv[0]).name + '\\n')\n"
+)
+DUMMY_RED = "raise SystemExit(1)\n"
 
 
 def _tests_job() -> str:
@@ -146,6 +181,58 @@ def _node_runs(steps: list[str]) -> list[tuple[int, str]]:
     ]
 
 
+def _without_comments(text: str) -> str:
+    """Ohne reine Kommentarzeilen -- auch die im Inneren eines ``run``-Blocks."""
+    return "\n".join(
+        line for line in text.splitlines() if not line.lstrip().startswith("#")
+    )
+
+
+def _run_script(step: str) -> str:
+    """Das Shell-Skript aus dem ``run: |``-Block eines Schritts, ausgerückt."""
+    lines = step.splitlines()
+    start = next(
+        (i + 1 for i, line in enumerate(lines) if re.match(r"^ *(?:- )?run: \|\s*$", line)),
+        None,
+    )
+    assert start is not None, f"dieser Schritt hat keinen 'run: |'-Block:\n{step}"
+    body = lines[start:]
+    indents = [len(line) - len(line.lstrip()) for line in body if line.strip()]
+    assert indents, f"der 'run: |'-Block ist leer:\n{step}"
+    pad = min(indents)
+    return "\n".join(line[pad:] if line.strip() else "" for line in body) + "\n"
+
+
+def _run_glob_script(files: dict[str, str]) -> tuple[int, str, list[str]]:
+    """Das Skript des Glob-Schritts gegen ``files`` laufen lassen.
+
+    Der Verhaltenstest, den kein Textvergleich ersetzt: ``status=0`` kurz vor
+    ``exit $status`` oder ein ``if false; then ... fi`` um den Aufruf lassen
+    jede Zeile, auf die wir sonst prüfen, wörtlich stehen -- der Schritt endet
+    trotzdem grün. Also führen wir ihn aus.
+
+    Gibt ``(Exit-Code, Ausgabe, Namen der wirklich gelaufenen Dateien)`` zurück.
+    """
+    steps = _steps()
+    script = _run_script(steps[_glob_step_index(steps)])
+    with tempfile.TemporaryDirectory() as tmp:
+        work = Path(tmp)
+        (work / "tests").mkdir()
+        for name, body in files.items():
+            (work / "tests" / name).write_text(body, encoding="utf-8")
+        (work / "step.sh").write_text(script, encoding="utf-8")
+        # Wie GitHub den Standard-Shell-Schritt startet.
+        result = subprocess.run(
+            ["bash", "--noprofile", "--norc", "-e", "-o", "pipefail", "step.sh"],
+            cwd=work,
+            capture_output=True,
+            text=True,
+        )
+        trace = work / "ran.txt"
+        ran = sorted(trace.read_text(encoding="utf-8").split()) if trace.is_file() else []
+    return result.returncode, result.stdout + result.stderr, ran
+
+
 def _pip_installs(steps: list[str]) -> list[tuple[int, str]]:
     return [
         (index, packages)
@@ -191,12 +278,130 @@ def test_the_bare_step_still_globs_instead_of_listing_files() -> None:
     assert "exit $status" in step, "der Glob-Schritt gibt status nicht mehr weiter"
 
 
+def test_the_glob_step_really_starts_what_it_finds() -> None:
+    """Der Textvergleich oben sieht nur, dass der Aufruf dasteht."""
+    code, output, ran = _run_glob_script(
+        {"test_zz_first.py": DUMMY_GREEN, "test_zz_second.py": DUMMY_GREEN}
+    )
+    assert ran == ["test_zz_first.py", "test_zz_second.py"], (
+        "der Glob-Schritt hat die gefundenen Dateien nicht gestartet, gelaufen "
+        f"sind {ran}:\n{output}"
+    )
+    assert code == 0, (
+        f"der Glob-Schritt wird rot, obwohl jede Datei grün ist:\n{output}"
+    )
+
+
+def test_the_glob_step_really_goes_red_when_a_file_goes_red() -> None:
+    """Die Probe, die ``status=0`` vor ``exit $status`` nicht überlebt.
+
+    Dieselbe Probe fängt ein ``if false; then python3 "$path" ...; fi``: Alle
+    Zeilen, auf die der Textvergleich prüft, stehen dann noch wörtlich da, der
+    Schritt endet aber mit 0.
+    """
+    code, output, _ = _run_glob_script(
+        {"test_zz_green.py": DUMMY_GREEN, "test_zz_red.py": DUMMY_RED}
+    )
+    assert code != 0, (
+        "eine fehlgeschlagene Testdatei macht den Glob-Schritt nicht rot -- die "
+        f"CI wird grün, obwohl ein Test kaputt ist:\n{output}"
+    )
+
+
+def test_the_glob_step_really_goes_red_with_nothing_to_run() -> None:
+    """Ein leeres ``tests/`` darf keinen Erfolg melden."""
+    code, output, _ = _run_glob_script({})
+    assert code != 0, (
+        "der Glob-Schritt meldet Erfolg, ohne eine einzige Datei getestet zu "
+        f"haben:\n{output}"
+    )
+
+
+def test_the_glob_step_really_goes_red_when_the_skip_list_swallows_everything() -> None:
+    """Die zweite Hälfte der Bremse gegen einen Durchlauf, der nichts testet.
+
+    Ein leerer Glob fällt schon deshalb auf, weil die Shell das Muster
+    unverändert an ``python3`` reicht. Verschluckt dagegen die Liste jede
+    gefundene Datei, läuft die Schleife sauber durch und nur der Zähler merkt
+    es -- ein ``ran=1`` als Startwert macht die Bremse lautlos wirkungslos.
+    Hier liegen darum ausschließlich Dateien der Liste, alle davon grün: Rot
+    werden kann der Schritt dann nur noch über den Zähler.
+    """
+    declared = _declared_skips(_steps())
+    assert declared, "die Liste needs_library ist leer"
+    code, output, ran = _run_glob_script(dict.fromkeys(declared, DUMMY_GREEN))
+    assert ran == [], f"die Liste needs_library greift nicht mehr, gelaufen: {ran}"
+    assert code != 0, (
+        "der Glob-Schritt meldet Erfolg, obwohl die Liste needs_library jede "
+        f"gefundene Datei übersprungen hat:\n{output}"
+    )
+
+
+def test_the_glob_step_really_skips_the_library_tests() -> None:
+    """Die Kehrseite: Was auf der Liste steht, darf hier nicht nackt starten.
+
+    Jede Datei der Liste liegt als Attrappe bereit, die sofort fehlschlägt.
+    Greift die ``case``-Logik, läuft keine davon und der Schritt bleibt grün.
+    """
+    declared = _declared_skips(_steps())
+    assert declared, "die Liste needs_library ist leer"
+    files = dict.fromkeys(declared, DUMMY_RED)
+    files["test_zz_green.py"] = DUMMY_GREEN
+    code, output, ran = _run_glob_script(files)
+    assert ran == ["test_zz_green.py"], (
+        "der Glob-Schritt startet Dateien der Liste needs_library nackt, "
+        f"gelaufen sind {ran}:\n{output}"
+    )
+    assert code == 0, (
+        f"der Glob-Schritt wird rot, obwohl er nur Übersprungenes vorfand:\n{output}"
+    )
+
+
 def test_no_step_is_allowed_to_fail_quietly() -> None:
-    """``continue-on-error`` macht aus einem roten Test eine grüne CI."""
+    """Zwei Schlüssel machen aus einem roten Test eine grüne CI.
+
+    ``continue-on-error`` lässt den Schritt fehlschlagen, ohne dass es zählt.
+    ``if:`` ist der schärfere Fall: Ein falsy Ausdruck -- ``false`` genügt, aber
+    auch ein ``github.event_name == 'push'`` beim wöchentlichen Cron -- und der
+    Test startet gar nicht erst. Beides bleibt sonst still.
+    """
     for step in _steps():
-        assert "continue-on-error" not in step, (
-            "ein Schritt im Job 'tests' darf fehlschlagen, ohne den Job rot zu "
+        muffled = set(STEP_KEY.findall(step)) & MUFFLERS
+        assert not muffled, (
+            f"ein Schritt im Job 'tests' trägt {sorted(muffled)} und kann damit "
+            "fehlschlagen oder übersprungen werden, ohne den Job rot zu "
             f"machen:\n{step}"
+        )
+
+
+def test_the_job_itself_cannot_be_switched_off() -> None:
+    """Auf Job-Ebene schalten dieselben zwei Schlüssel alle Schritte auf einmal ab."""
+    muffled = set(JOB_KEY.findall(_tests_job())) & MUFFLERS
+    assert not muffled, (
+        f"der Job 'tests' trägt {sorted(muffled)} auf Job-Ebene -- damit ist "
+        "jeder Schritt darin wirkungslos, so streng er auch geprüft wird"
+    )
+
+
+def test_a_single_file_step_starts_that_file_and_nothing_else() -> None:
+    """Ein Einzelschritt ist der Aufruf selbst, nicht ein Text, der ihn enthält.
+
+    ``echo python3 tests/x.py`` und ``python3 tests/x.py || true`` nennen die
+    Datei beide und sind beide immer grün. Wer den Namen nennt, muss ihn auch
+    starten.
+    """
+    steps = _steps()
+    glob_at = _glob_step_index(steps)
+    for index, step in enumerate(steps):
+        if index == glob_at:
+            continue  # Der globt, statt Namen zu nennen; er hat eigene Tests.
+        named = set(NAMES_A_TEST_FILE.findall(_without_comments(step)))
+        started = set(RUN_PY.findall(step)) | set(RUN_NODE.findall(step))
+        assert named == started, (
+            f"ein Schritt nennt {sorted(named - started)}, startet die Datei "
+            "aber nicht als vollständige run-Zeile -- ein Präfix wie 'echo' "
+            "oder ein angehängtes '|| true' lässt den Schritt grün bleiben, "
+            f"egal wie der Test ausgeht:\n{step}"
         )
 
 
