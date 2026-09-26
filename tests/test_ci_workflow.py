@@ -292,6 +292,37 @@ def test_the_glob_step_really_starts_what_it_finds() -> None:
     )
 
 
+def test_the_glob_step_starts_every_real_test_file() -> None:
+    """Dieselbe Probe, aber mit den Namen, die wirklich in tests/ liegen.
+
+    Der Test darüber speist Kunstnamen ein (``test_zz_*.py``). Eine zusätzliche
+    Skip-Klausel im Schleifenrumpf, die auf einen ECHTEN Dateinamen gemünzt ist,
+    bleibt darin unsichtbar -- und genau die wäre der stille Ausfall, gegen den
+    dieser Test überhaupt existiert: eine Datei liefe nirgends mehr, und die CI
+    bliebe grün. Also einmal mit Attrappen unter den echten Namen laufen und
+    nachzählen.
+
+    Die Attrappen sind grün und tun nichts: geprüft wird, WELCHE Dateien der
+    Schritt startet, nicht was sie tun.
+    """
+    steps = _steps()
+    skipped = set(_declared_skips(steps))
+    real = sorted(path.name for path in (ROOT / "tests").glob("test_*.py"))
+    assert real, "in tests/ liegt keine einzige Testdatei -- der Glob wäre sinnlos"
+
+    code, output, ran = _run_glob_script({name: DUMMY_GREEN for name in real})
+
+    expected = sorted(name for name in real if name not in skipped)
+    assert ran == expected, (
+        "der Glob-Schritt startet nicht genau die Dateien ohne Drittbibliothek.\n"
+        f"erwartet: {expected}\n"
+        f"gelaufen: {ran}\n"
+        f"nicht gelaufen: {sorted(set(expected) - set(ran))}\n"
+        f"zusätzlich gelaufen: {sorted(set(ran) - set(expected))}\n{output}"
+    )
+    assert code == 0, f"der Schritt wird rot, obwohl jede Attrappe grün ist:\n{output}"
+
+
 def test_the_glob_step_really_goes_red_when_a_file_goes_red() -> None:
     """Die Probe, die ``status=0`` vor ``exit $status`` nicht überlebt.
 
