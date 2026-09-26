@@ -51,7 +51,8 @@ for t in tests/test_*.py; do python3 "$t" || break; done
 
 Most need nothing installed. Seven reach code that imports a library and the
 loop above stops on them unless it is there — `voluptuous` for the config flow's
-schema (`test_panel2_discovery.py`), `cbor2` for the six that reach the protocol
+schema, which two of them drive for real (`test_panel2_discovery.py` and
+`test_passive_scan_discovery.py`), `cbor2` for the five that reach the protocol
 module, whether to build real frames and parse them back or by way of the
 coordinator that imports it:
 
@@ -65,5 +66,13 @@ runs nothing on its own.
 CI runs every file too, in two stages: everything that needs no library on a
 bare interpreter first, so a test double that quietly grows an `import cbor2`
 fails there instead of passing because a later step had already installed it.
-Adding a test file is enough to have it run — there is no list to keep in step,
-which is how five of them went uncovered for the whole 0.9.0 beta series.
+Adding a test file is enough to have it run — there is no list of every test to
+keep in step, which is how five of them went uncovered for the whole 0.9.0 beta
+series. What does have to be kept in step is the short skip list of the seven
+library tests, and a file wrongly on it falls out of the bare stage's guarantee
+rather than failing loudly: `test_panel_declared_options.py` sat there from
+f6d6476 until 2026-09-26 without ever importing either library. The week before,
+1b8158e had placed that file correctly, above the first `pip install`; f6d6476
+moved it into the skip list against its own message, which says only the seven
+tests it names may need a third-party library -- and one of those seven imports
+neither.
