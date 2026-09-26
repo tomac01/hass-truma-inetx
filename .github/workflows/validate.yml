@@ -67,6 +67,7 @@ jobs:
           test_measure_request.py
           test_param_meta.py
           test_protocol_frames.py
+          test_session_handle_frame.py
           "
           ran=0
           status=0
@@ -107,3 +108,4 @@ jobs:
       - run: python3 tests/test_measure_request.py
       - run: python3 tests/test_param_meta.py
       - run: python3 tests/test_protocol_frames.py
+      - run: python3 tests/test_session_handle_frame.py
