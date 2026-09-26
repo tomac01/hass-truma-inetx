@@ -24,18 +24,20 @@ Was der Test festnagelt:
    ``profiles.py`` -- unmittelbar vor dem Wort "Timer", sonst belegt die
    Vier aus "vier Kopplungen" jede beliebige Slot-Zahl -- und die
    Upstream-Version aus ``manifest.json``,
-4. Benutzeranleitung und Lovelace-Beispiel nennen die Bedienelemente in
-   beiden Sprachfassungen so, wie die Übersetzung sie nennt,
+4. Benutzeranleitung und Lovelace-Beispiel nennen die Bedienelemente --
+   den Diesel-Schalter eingeschlossen -- in beiden Sprachfassungen so, wie
+   die Übersetzung sie nennt,
 5. kein Dokument dehnt einen Entitätsnamen zu einem, den es nicht gibt
    ("Electric heating output"), und tauscht auch kein Wort gleicher Länge
    aus ("Elektrische Heizleistung"),
 6. im Lovelace-Beispiel steht die Warnung "IDs stehen erst nach der
    Installation fest" VOR dem ersten Platzhalter, in beiden Sprachfassungen
    -- danach hätte sie niemand mehr gelesen,
-7. jede Entity-ID in ``truma-controls.yaml`` lässt sich auf etwas
-   zurückführen, das die Integration heute noch erzeugen kann, und alle
-   tragen denselben Platzhalter-Präfix (die Anleitung verlangt eine
-   globale Ersetzung -- mit zwei Präfixen bliebe die Hälfte stehen),
+7. jede Entity-ID in ``truma-controls.yaml`` geht auf einen übersetzten
+   Namen zurück, den die Integration heute noch vergibt -- nicht auf einen
+   Übersetzungsschlüssel, aus dem Home Assistant nie einen Slug baut --,
+   und alle tragen denselben Platzhalter-Präfix (die Anleitung verlangt
+   eine globale Ersetzung -- mit zwei Präfixen bliebe die Hälfte stehen),
 8. kein Dokument behauptet, der Diesel-Schalter sei ersetzt oder entfernt,
    solange der Code ihn anbietet,
 9. die Transport-Doku erwähnt die ``probe``-Ausnahme, solange ``ble.py``
@@ -244,7 +246,11 @@ def test_the_upgrade_note_names_what_the_code_offers() -> None:
         ("binary_sensor", "line_power"),
         ("number", "panel_brightness"),
     ]
-    for platform, key in claimed:
+    # Nicht neu, aber im Hinweis beim Namen genannt: der Diesel-Schalter
+    # steht dort als das, was neben der neuen Auswahl bestehen bleibt. Eine
+    # Umbenennung im Code muss auch diese Stelle rot färben.
+    still_offered = [("switch", "diesel")]
+    for platform, key in claimed + still_offered:
         name = _entity_name("de", platform, key)
         assert name in note, f"{platform}.{key} heißt {name!r}, der Hinweis nennt das nicht"
 
@@ -275,6 +281,10 @@ def test_the_docs_call_the_controls_by_their_real_names() -> None:
         ("select", "energy_source"),
         ("select", "electric_level"),
         ("select", "water_mode"),
+        # Der Diesel-Schalter gehört in beide Listen, obwohl er auf keiner
+        # Beispielkarte liegt: beide Dokumente nennen ihn fett, und genau
+        # seinetwegen wurde die Doku zuletzt korrigiert.
+        ("switch", "diesel"),
         ("sensor", "operation"),
         ("button", "manual_sync"),
         ("button", "manual_stop"),
@@ -282,10 +292,12 @@ def test_the_docs_call_the_controls_by_their_real_names() -> None:
         ("binary_sensor", "connection"),
         ("binary_sensor", "proxy_connection"),
     ]
-    # Das Lovelace-Beispiel beschreibt nur die Bedienelemente auf der Karte.
+    # Das Lovelace-Beispiel beschreibt nur die Bedienelemente auf der Karte
+    # -- und den Diesel-Schalter, der als einziger daneben erwähnt wird.
     lovelace_controls = [
         ("select", "energy_source"),
         ("select", "electric_level"),
+        ("switch", "diesel"),
         ("sensor", "operation"),
         ("button", "manual_stop"),
         ("binary_sensor", "connection"),
@@ -388,17 +400,20 @@ def _placeholder_prefix() -> str:
 def test_every_example_entity_id_is_one_the_integration_can_produce() -> None:
     """Jede Beispiel-ID muss sich auf eine heutige Entität zurückführen lassen.
 
-    Der Slug einer Entität entsteht aus ihrem übersetzten Namen, und welche
-    Sprache bei der Anlage aktiv war, entscheidet der Benutzer -- deshalb
-    zählt jeder Übersetzungsschlüssel und jeder Name aus beiden Sprachen als
-    gültig. Was in keiner davon vorkommt, gibt es nicht mehr.
+    Der Slug einer Entität entsteht aus ihrem übersetzten NAMEN, nie aus dem
+    Übersetzungsschlüssel; welche Sprache bei der Anlage aktiv war,
+    entscheidet der Benutzer, und fehlt eine Fassung, fällt Home Assistant
+    auf Englisch zurück. Gültig ist deshalb genau, was in einer der beiden
+    Fassungen ein Name ist. Die Schlüssel mitzuzählen wäre bequem und
+    falsch: es sind genau die Slugs von vor 0.9.0b17
+    (``binary_sensor.…_heating_active``, ``select.…_water_mode``), die
+    keine Installation je vergibt und die dieser Test finden soll.
     """
     known: dict[str, set[str]] = {}
     for lang in ("de", "en"):
         for platform, keys in _translations(lang).items():
             slugs = known.setdefault(platform, set())
-            for key, entry in keys.items():
-                slugs.add(key)
+            for entry in keys.values():
                 if entry.get("name"):
                     slugs.add(_slugify(entry["name"].replace("{slot}", "")))
 
