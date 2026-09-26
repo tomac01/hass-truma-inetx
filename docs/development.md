@@ -76,3 +76,39 @@ f6d6476 until 2026-09-26 without ever importing either library. The week before,
 moved it into the skip list against its own message, which says only the seven
 tests it names may need a third-party library — and one of those seven imports
 neither.
+
+## How good are those tests?
+
+`tools/mutate.py` answers that by measuring instead of guessing: it changes the
+source in one place and checks whether a test goes red. Nothing notices, and
+either that line is uncovered or the change means nothing — which of the two is
+a question only reading the code answers, so the tool gives the list, not the
+verdict.
+
+```bash
+tools/mutate.py --python /path/to/venv/bin/python3        # full run, ~10 min
+tools/mutate.py --only bus.py --python …                   # one module
+tools/mutate.py --limit 40 --python …                      # even sample
+```
+
+Point `--python` at an interpreter that has `cbor2` and `voluptuous`. Without
+them the tests that need one fail on import and every mutation in them counts as
+caught, which flatters the score — the tool says so when it sees that.
+
+**74.3 % as of 2026-09-26** (733 of 987 mutations caught). The tool holds that
+number in `REFERENCE` and compares every run against it, so a regression shows
+up instead of passing unnoticed. The weakest files are the Bluetooth side:
+`session.py` at 53 %, `bt.py` 54 %, `ble.py` 57 %, `pairing.py` 58 %. The
+strongest are `config_flow.py` at 97 % and `truma/const.py` at 96 %.
+
+Two things make the measurement trustworthy, and both were once broken. Each
+worker gets its own copy of the tree, so the working directory is never touched.
+And `tests/stubs.py` must compile from source rather than from a cached `.pyc`
+— Python treats a cache entry as valid while mtime (whole seconds) and file size
+are unchanged, which is exactly the kind of edit a mutation makes. Before that
+was fixed, real mutations in `select.py` read as survivors. If a run suddenly
+reports far more survivors, check that guard first:
+`python3 tests/test_fresh_compile.py`.
+
+The history is written up in `REV-005` of the proxy project, together with what
+the first measurement found.
