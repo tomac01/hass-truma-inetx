@@ -79,6 +79,12 @@ jobs:
           fi
           echo "$ran test files ran with no third-party library"
           exit $status
+      # The card check runs under Node, not Python, so the glob above cannot
+      # see it. It goes here, still in the bare stage, because it needs
+      # nothing pip installs -- and the runner's preinstalled Node is enough,
+      # so no setup-node step.
+      - name: operation card
+        run: node tests/test_operation_card.cjs
       # The config flow builds its voluptuous schema at import time, and this
       # test drives the real flow rather than a stub of it.
       - run: pip install voluptuous
