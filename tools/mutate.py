@@ -143,11 +143,29 @@ def mutations_for(path: Path) -> list[dict]:
 
 
 def collect(only: str | None) -> list[dict]:
-    """Alle Mutationen, überlappungsfrei, optional auf eine Datei begrenzt."""
+    """Alle Mutationen, überlappungsfrei, optional auf eine Datei begrenzt.
+
+    ``only`` darf der bloße Dateiname sein. Trifft der mehr als eine Datei, ist
+    das ein Fehler und kein Zufallstreffer: ``--only const.py`` meinte einmal
+    unbemerkt auch ``truma/const.py``, und der Lauf meldete 10 Überlebende, wo
+    9 erwartet waren. Wer die Zahl nur gegen die Erwartung hält, sucht dann an
+    der falschen Stelle. Lieber abbrechen und den Pfad nennen lassen.
+    """
+    matched = [
+        f
+        for f in sorted(SRC.rglob("*.py"))
+        if not only or f.name == only or str(f.relative_to(ROOT)) == only
+    ]
+    if only and len(matched) > 1:
+        paths = ", ".join(str(f.relative_to(ROOT)) for f in matched)
+        raise SystemExit(
+            f"--only {only} trifft {len(matched)} Dateien: {paths}\n"
+            "Den vollen Pfad angeben, damit der Umfang eindeutig ist."
+        )
+    if only and not matched:
+        raise SystemExit(f"--only {only} trifft keine Datei unter {SRC}")
     out: list[dict] = []
-    for f in sorted(SRC.rglob("*.py")):
-        if only and f.name != only and str(f.relative_to(ROOT)) != only:
-            continue
+    for f in matched:
         out.extend(mutations_for(f))
     seen, unique = set(), []
     for m in out:
@@ -306,7 +324,8 @@ def report(results: list[dict]) -> int:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--only", metavar="DATEI",
-                    help="nur dieses Modul, z.B. bus.py")
+                    help="nur dieses Modul, z.B. bus.py; bei mehrdeutigem "
+                         "Namen den vollen Pfad")
     ap.add_argument("--limit", type=int, metavar="N",
                     help="gleichmäßige Stichprobe von N Mutationen")
     ap.add_argument("--workers", type=int, default=8,
