@@ -9,7 +9,7 @@ DOMAIN = "truma_inetx"
 LOGGER = logging.getLogger(__package__)
 
 # Advertised local-name prefix used for discovery / manual matching. An iNet X
-# Panel 2 still carries it -- "Truma iNetX-5770EB", measured in issue #6 -- so
+# Panel 2 still carries it -- "Truma iNetX-<suffix>", measured in issue #6 -- so
 # it survived a hardware generation that changed the advertised service UUID.
 LOCAL_NAME_PREFIX = "Truma iNetX"
 
