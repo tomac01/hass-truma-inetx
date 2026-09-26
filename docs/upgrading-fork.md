@@ -1,4 +1,4 @@
-# Umstieg von 0.7.3-live.x auf 0.9.0b23-live.x
+# Umstieg von 0.7.3-live.x auf 0.9.0b23.postN
 
 [← README](../README.md)
 

@@ -33,7 +33,7 @@ der Proxy online, während die BLE-Verbindung zwischen zwei Abfragen aus ist.
 
 ## Entity-IDs anpassen
 
-> **Seit 0.9.0b23-live.1 stehen die Entity-IDs nicht vorab fest.** Die
+> **Seit 0.9.0b23.post1 stehen die Entity-IDs nicht vorab fest.** Die
 > Unique-ID trägt jetzt die Busadresse, und der Entity-Slug entsteht aus dem
 > Namen des Busgeräts plus dem Entitätsnamen. Welche IDs deine Installation
 > vergibt, siehst du erst danach — unter Einstellungen → Geräte & Dienste →
@@ -136,7 +136,7 @@ panel link is off between polls.
 
 ## Replace the entity prefix
 
-> **Since 0.9.0b23-live.1 the entity ids are not fixed in advance.** The
+> **Since 0.9.0b23.post1 the entity ids are not fixed in advance.** The
 > unique id now carries the bus address, and the entity slug is built from the
 > bus device's name plus the entity name. You only learn what your
 > installation issued afterwards, under Settings → Devices & services → Truma
