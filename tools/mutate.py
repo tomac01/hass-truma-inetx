@@ -66,7 +66,8 @@ REFERENCE = {"date": "2026-09-26", "caught": 733, "total": 987}
 # Tests, die Quelldateien mit ``ast`` lesen statt sie zu importieren. Sie sehen
 # eine Mutation, ohne das Modul zu laden, und laufen darum immer mit.
 ALWAYS = ("test_ci_workflow.py", "test_docs_consistency.py",
-          "test_manifest_version.py", "test_placeholder_addresses.py")
+          "test_manifest_version.py", "test_parallel_updates.py",
+          "test_placeholder_addresses.py")
 
 COMPARE = {
     ast.Lt: (b"<", b"<="), ast.LtE: (b"<=", b"<"),

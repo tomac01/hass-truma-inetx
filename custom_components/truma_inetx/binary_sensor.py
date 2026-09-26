@@ -15,8 +15,13 @@ from .entity import TrumaEntity, TrumaParamEntity, async_add_rows
 from .profiles import Row
 from .truma.const import DEV_PANEL
 
-# Entities are coordinator-driven and have no update() method, so Home
-# Assistant would create no semaphore anyway; stated explicitly.
+# Diese Entitäten werden vom Coordinator versorgt und haben kein *synchrones*
+# ``update()``; Home Assistant legt darum ohnehin kein Semaphor an -- es fragt
+# in ``EntityPlatform._async_add_entity`` nach ``hasattr(entity, "update")``.
+# Dass ``CoordinatorEntity`` ein ``async_update`` mitbringt, ändert daran
+# nichts: danach wird nicht gefragt. Die 0 ist also gleichbedeutend mit dem
+# Weglassen, steht aber ausdrücklich da -- und unter Aufsicht, denn jeder Wert
+# darüber wäre sehr wohl Verhalten (``tests/test_parallel_updates.py``).
 PARALLEL_UPDATES = 0
 
 
