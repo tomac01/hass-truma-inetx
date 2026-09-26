@@ -112,16 +112,27 @@ GUARDED = (
     "test_panel2_discovery.py",
     "test_passive_scan_discovery.py",
     "test_entry_teardown.py",
+    "test_coordinator_state_flags.py",
 )
 
 # Bytes, die als Platzhalter durchgehen: doppelte Ziffern und doppelte
 # Buchstaben. Sie ergeben die Adressen, die man auf Anhieb als erfunden liest.
 PLACEHOLDER_BYTES = frozenset(f"{d}{d}" for d in "0123456789ABCDEF")
 
-# Zwei bis sechs hexadezimale Bytepaare, durch Doppelpunkte getrennt. Die
-# Wortgrenzen halten längere Zeichenketten heraus, in denen zufällig ein
-# solches Muster steckt.
-ADDRESS = re.compile(r"\b(?:[0-9A-Fa-f]{2}:){1,5}[0-9A-Fa-f]{2}\b")
+# Hexadezimale Bytepaare in allen drei Schreibweisen, die im Projekt
+# vorkommen: mit Doppelpunkten (zwei bis sechs Paare, damit auch ein
+# abgeschnittener Rest auffällt), mit Unterstrichen wie in BlueZ-Objektpfaden
+# und mit Bindestrichen, die BlueZ als Ersatznamen liefert. Die beiden
+# letzten Formen sind nachträglich dazugekommen: am 2026-09-26 hatten sie je
+# einen echten Wert überleben lassen, weil das Muster nur Doppelpunkte kannte
+# -- einen davon in ``custom_components/truma_inetx/bt.py``, also im Code, der
+# an Nutzer geht. Die Wortgrenzen halten längere Zeichenketten heraus, in
+# denen zufällig ein solches Muster steckt.
+ADDRESS = re.compile(
+    r"\b(?:[0-9A-Fa-f]{2}:){1,5}[0-9A-Fa-f]{2}\b"
+    r"|\b(?:[0-9A-Fa-f]{2}_){5}[0-9A-Fa-f]{2}\b"
+    r"|\b(?:[0-9A-Fa-f]{2}-){5}[0-9A-Fa-f]{2}\b"
+)
 
 
 def _offenders(text: str) -> list[tuple[int, str]]:
@@ -129,7 +140,7 @@ def _offenders(text: str) -> list[tuple[int, str]]:
     found = []
     for number, line in enumerate(text.splitlines(), start=1):
         for match in ADDRESS.finditer(line):
-            octets = match.group(0).upper().split(":")
+            octets = re.split("[:_-]", match.group(0).upper())
             if not all(octet in PLACEHOLDER_BYTES for octet in octets):
                 found.append((number, match.group(0)))
     return found
