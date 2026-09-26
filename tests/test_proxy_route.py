@@ -35,6 +35,13 @@ class _LocalScanner:
         self.source = source
 
 
+# Die Quelle eines entfernten Scanners ist für diesen Test nur ein
+# undurchsichtiger Schlüssel: Er prüft, ob genau dieser String zurückkommt und
+# ob ein anderer ihn nicht auslöst -- welcher Wert dort steht, trägt nichts
+# bei. Deshalb ein Platzhalter im Stil der übrigen Datei und keine Adresse aus
+# einem laufenden Aufbau; ``test_placeholder_addresses.py`` hält das fest.
+PROXY_SOURCE = "EE:FF"
+
 SCANNERS: dict[str, list] = {}
 
 
@@ -75,9 +82,9 @@ def test_only_a_remote_scanner_counts_as_a_proxy() -> None:
     SCANNERS.clear()
     SCANNERS["AA:BB"] = [
         SimpleNamespace(scanner=_LocalScanner("local")),
-        SimpleNamespace(scanner=_RemoteScanner("A0:A3:B3:90:C5:3E")),
+        SimpleNamespace(scanner=_RemoteScanner(PROXY_SOURCE)),
     ]
-    assert BT.async_remote_scanner_source(None, "AA:BB") == "A0:A3:B3:90:C5:3E"
+    assert BT.async_remote_scanner_source(None, "AA:BB") == PROXY_SOURCE
 
     SCANNERS["CC:DD"] = [SimpleNamespace(scanner=_LocalScanner("local"))]
     assert BT.async_remote_scanner_source(None, "CC:DD") is None
@@ -90,11 +97,11 @@ def test_tracker_reports_unknown_until_a_route_has_run() -> None:
 
     assert tracker.available is None, "ohne Route darf nichts behauptet werden"
 
-    tracker.remember_source("A0:A3:B3:90:C5:3E")
+    tracker.remember_source(PROXY_SOURCE)
     assert tracker.available is False
     assert len(changes) == 1
 
-    MANAGER.sources["A0:A3:B3:90:C5:3E"] = object()
+    MANAGER.sources[PROXY_SOURCE] = object()
     assert tracker.available is True
 
 
@@ -103,13 +110,13 @@ def test_only_the_remembered_scanner_notifies() -> None:
     changes: list = []
     tracker = PROXY.TrumaProxyTracker(lambda: changes.append(True))
     tracker.async_setup()
-    tracker.remember_source("A0:A3:B3:90:C5:3E")
+    tracker.remember_source(PROXY_SOURCE)
     changes.clear()
 
     MANAGER.callback(SimpleNamespace(scanner=_RemoteScanner("something:else")))
     assert changes == [], "fremder Scanner hat ein Update ausgelöst"
 
-    MANAGER.callback(SimpleNamespace(scanner=_RemoteScanner("A0:A3:B3:90:C5:3E")))
+    MANAGER.callback(SimpleNamespace(scanner=_RemoteScanner(PROXY_SOURCE)))
     assert changes == [True]
 
 

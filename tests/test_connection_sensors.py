@@ -47,7 +47,7 @@ PANEL = 0x0101
 # Die Adresse, über die in den Connect-Prüfungen die Route läuft, und der
 # entfernte Scanner, der sie geliefert hat.
 ADDRESS = "AA:BB:CC:DD:EE:FF"
-SOURCE = "esphome-proxy-holly"
+SOURCE = "esphome-proxy-one"
 
 stubs.install_homeassistant()
 stubs.stub_transport()
