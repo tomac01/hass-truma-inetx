@@ -13,7 +13,10 @@ Was der Test festnagelt:
 2. ein Befehlsfehler überlebt nachfolgende erfolgreiche Syncs,
 3. nur ein neuerer Befehl kann ein Befehlsergebnis ablösen,
 4. ein älterer Befehl, der später endet, löst es nicht ab,
-5. Abbruch ist ein Ergebnis, kein Verschwinden.
+5. Abbruch ist ein Ergebnis, kein Verschwinden,
+6. der Befehlsfehler ist schon sichtbar, *während* der Sync noch läuft,
+7. ein Sync veröffentlicht sein eigenes Ergebnis — und räumt es wieder weg,
+8. ein Sync, der vor dem Befehl fertig wird, verschluckt dessen Fehler nicht.
 
 Run: ``python3 tests/test_operations.py``
 """
@@ -49,6 +52,14 @@ def test_a_command_failure_survives_later_syncs() -> None:
     command = reg.begin("energy_source", "hybrid")
     sync = reg.begin("sync")
     reg.end(command, "Truma did not confirm EnergySrc.ElectricLevel=1")
+
+    # Schon jetzt, mit dem Sync noch unterwegs: der Fehler steht vor der
+    # laufenden Hintergrundarbeit. Ein Refresh ist der längste Vorgang im
+    # System, und in diesem Fenster darf der Fehlertext nicht verschwinden —
+    # eine Automation, die auf ``error`` hört, sähe ihn sonst nie.
+    assert reg.state == "error", "der Fehler verschwand hinter dem laufenden Sync"
+    assert reg.attributes["action"] == "energy_source"
+
     reg.end(sync)
 
     assert reg.state == "error"
@@ -58,6 +69,73 @@ def test_a_command_failure_survives_later_syncs() -> None:
     # Auch eine weitere, vollständig erfolgreiche Runde ändert daran nichts.
     reg.end(reg.begin("sync"))
     assert reg.state == "error"
+
+    # Andersherum gilt der Vorrang nicht: ein *Sync*-Fehler darf laufende
+    # Arbeit nicht verdecken — sonst meldete das Dashboard einen alten
+    # Refresh-Fehler, während gerade wieder aufgefrischt wird.
+    reg = _registry()
+    reg.end(reg.begin("sync"), "no route to the panel")
+    assert reg.state == "error"
+
+    reg.begin("sync")
+    assert reg.state == "syncing", "ein alter Sync-Fehler schlug laufende Arbeit"
+
+
+def test_a_failed_sync_is_published_and_later_cleared() -> None:
+    """Der Refresh, den der Nutzer selbst auslöst, muss seinen Fehler zeigen.
+
+    ``operation("sync")`` steht im Coordinator genau einmal, in
+    ``async_request_manual_session`` — also hinter dem Knopf "Aktualisieren".
+    Scheitert der, ist der Vorgangs-Sensor die Entität, die das sagen soll.
+    Ohne diese Prüfung könnte ein Sync sein Ergebnis überhaupt nie
+    veröffentlichen, und der Sensor stünde auf "idle" ohne Fehlertext.
+
+    Der zweite Teil ist die Gegenrichtung: ein gelungener Refresh muss den
+    vorangegangenen Refresh-Fehler wieder wegräumen. Sonst bliebe die alte
+    Meldung dauerhaft stehen, bis irgendwann ein Befehl läuft.
+    """
+    reg = _registry()
+    reg.end(reg.begin("sync"), "no route to the panel")
+
+    assert reg.state == "error", "ein Sync veröffentlichte sein Ergebnis nicht"
+    assert reg.attributes == {
+        "action": "sync",
+        "target": None,
+        "error": "no route to the panel",
+    }
+
+    reg.end(reg.begin("sync"))
+    assert reg.state == "idle", "der alte Sync-Fehler blieb stehen"
+    assert reg.attributes == {"action": None, "target": None, "error": None}
+
+
+def test_a_sync_that_finishes_first_does_not_swallow_the_command_error() -> None:
+    """Der Lastfall, für den es zwei getrennte Seriennummern gibt.
+
+    Der Nutzer stellt etwas, das auf Bestätigung wartet. Dazwischen läuft ein
+    Refresh an, wird *vor* dem Befehl fertig und veröffentlicht "idle". Dann
+    scheitert der Befehl. Er trägt das kleinere Token — geprüft gegen die
+    Sync-Seriennummer fiele sein Fehler heraus und der Sensor sagte "Bereit",
+    obwohl die Heizung nicht getan hat, was sie sollte.
+
+    Keine andere Prüfung hier beendet den Sync *vor* dem Befehl; genau daran
+    hängt der Unterschied.
+    """
+    reg = _registry()
+    command = reg.begin("energy_source", "hybrid")
+    sync = reg.begin("sync")
+
+    reg.end(sync)
+    assert reg.state == "changing", "der laufende Befehl war nicht mehr zu sehen"
+
+    reg.end(command, "Truma did not confirm EnergySrc.ElectricLevel=1")
+
+    assert reg.state == "error", "der Befehlsfehler wurde stillschweigend verschluckt"
+    assert reg.attributes == {
+        "action": "energy_source",
+        "target": "hybrid",
+        "error": "Truma did not confirm EnergySrc.ElectricLevel=1",
+    }
 
 
 def test_a_newer_command_clears_the_older_error() -> None:
