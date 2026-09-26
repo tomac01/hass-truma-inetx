@@ -21,8 +21,9 @@ from pathlib import Path
 
 # Reuse the stub loader next door: it imports ble.py with bleak and the truma
 # package faked out, which is the only way to exercise the transport offline.
-# fresh-import-exempt: lädt eine Testdatei, kein Integrationsmodul -- deren
-# eigene Ladung von ble.py geht über stubs.spec_from_source.
+# Lädt eine Testdatei, kein Integrationsmodul -- deren eigene Ladung von
+# ble.py geht über stubs.spec_from_source.
+# fresh-import-exempt: siehe die zwei Zeilen darüber.
 _spec = importlib.util.spec_from_file_location(
     "truma_transport_loader", Path(__file__).with_name("test_device_from_bluez.py")
 )

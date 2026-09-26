@@ -74,5 +74,5 @@ rather than failing loudly: `test_panel_declared_options.py` sat there from
 f6d6476 until 2026-09-26 without ever importing either library. The week before,
 1b8158e had placed that file correctly, above the first `pip install`; f6d6476
 moved it into the skip list against its own message, which says only the seven
-tests it names may need a third-party library -- and one of those seven imports
+tests it names may need a third-party library — and one of those seven imports
 neither.

@@ -47,10 +47,15 @@ Streudatei im Arbeitsbaum und jedes ``__pycache__`` im Produktionsverzeichnis.
   echten Baum, fände es nicht und scheiterte laut -- nicht still grün.
 * Der relative Import, den ein geladenes Modul selbst auslöst: er geht über
   ``stubs._FreshFinder``, der dafür am ``__path__`` von ``truma_pkg`` hängt.
+* Das Unterpaket: ``<tail>/__init__.py`` findet der Finder nur, weil er
+  ausdrücklich danach sucht -- sonst fiele jedes Unterpaket an den normalen
+  Pfad-Finder und damit wieder an den Cache.
 * ``stubs.spec_from_source``, der Weg für Testdateien, die ihr Modul selbst
-  öffnen. Dass keine von ihnen daran vorbeigeht, bewacht der letzte Testfall
-  über den Quelltext -- eine Liste gepflegter Ausnahmen wäre genau das, dessen
-  Verrotten hier überhaupt das Problem war.
+  öffnen. Dass keine von ihnen daran vorbeigeht, bewacht
+  ``test_no_test_file_slips_past_the_fresh_loader`` über den Syntaxbaum, und
+  ``test_the_watchdog_catches_every_way_around_it`` bewacht den Wächter --
+  eine Liste gepflegter Ausnahmen wäre genau das, dessen Verrotten hier
+  überhaupt das Problem war.
 
 ``test_the_production_tree_is_untouched`` nagelt das zum Schluss fest: Es
 vergleicht die Inhalts-Hashes aller ``*.py`` unter ``custom_components/`` mit
@@ -70,6 +75,7 @@ import importlib.machinery
 import importlib.util
 import os
 import py_compile
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -81,7 +87,11 @@ SRC = Path(__file__).resolve().parents[1] / "custom_components"
 
 # Name des Wegwerf-Moduls. Nichts im Projekt heißt so, damit der Testlauf
 # keinen echten Modulnamen in ``sys.modules`` verdeckt.
+TESTS = Path(__file__).resolve().parent
 PROBE = "fresh_compile_probe"
+
+# Markierung, mit der eine Stelle sich vom Wächter unten ausnimmt.
+EXEMPTION = "fresh-import-exempt:"
 
 
 @contextlib.contextmanager
@@ -172,6 +182,7 @@ def _read_with_plain_loader(file: Path) -> int:
     fullname = f"plain_{file.stem}"
     # fresh-import-exempt: der blanke Loader IST hier die Gegenprobe.
     loader = importlib.machinery.SourceFileLoader(fullname, str(file))
+    # fresh-import-exempt: dito, die Gegenprobe braucht genau diesen Weg.
     spec = importlib.util.spec_from_file_location(fullname, file, loader=loader)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
@@ -185,7 +196,7 @@ def _stale_read_precondition(file: Path) -> None:
     assert stale == 1, (
         f"ein unveränderter SourceFileLoader liest {stale} statt des alten Wertes 1. "
         "Damit ist die Voraussetzung dieses Regressionstests weggefallen: entweder "
-        "ist der angelegte .pyc keiner nach Zeitstempel -- dann steht ein Hash "
+        "ist die angelegte .pyc keine nach Zeitstempel -- dann steht ein Hash "
         "dahinter, der die Quelle wirklich vergleicht -- oder CPython hält einen "
         "solchen Eintrag nicht mehr für gültig, wenn mtime und Größe unverändert "
         "bleiben. Beides sagt nichts über stubs.AlwaysFresh; der Test muss dann "
@@ -355,44 +366,146 @@ def test_a_subpackage_also_sees_a_same_length_edit() -> None:
             )
 
 
+def _bare_loader_sites(directory: Path) -> list[str]:
+    """Stellen in ``directory``, die sich ihren Loader am frischen vorbei bauen.
+
+    Über den Syntaxbaum, nicht per Textsuche: sonst fänden die Testfälle unten
+    die Namen in ihrem eigenen Quelltext und in ihren Meldungen. Und über den
+    *Namen*, nicht über die Knotenart -- am 2026-09-26 gemessen rutschten sonst
+    ``from importlib.util import spec_from_file_location``, ein Alias auf die
+    Funktion und das direkte Bauen eines ``SourceFileLoader`` durch, also
+    gerade die naheliegendste Schreibweise und der eigentliche Mechanismus.
+
+    Nicht erfasst bleibt der Umweg über ``getattr`` mit einer Zeichenkette.
+    Wer den nimmt, umgeht mit Absicht, und dagegen hilft kein Wächter.
+    """
+    watched = {"spec_from_file_location", "SourceFileLoader"}
+    sites = []
+    for file in sorted(directory.glob("test_*.py")):
+        text = file.read_text(encoding="utf-8")
+        lines = text.splitlines()
+        for node in ast.walk(ast.parse(text)):
+            if isinstance(node, ast.Attribute):
+                name = node.attr
+            elif isinstance(node, ast.Name):
+                name = node.id
+            elif isinstance(node, ast.alias):
+                name = node.name
+            else:
+                continue
+            if name not in watched:
+                continue
+            # Die Markierung gilt für ihre eigene Zeile und die nächste, nicht
+            # weiter: ein größeres Fenster nähme die folgenden Stellen mit aus.
+            window = lines[max(0, node.lineno - 2):node.lineno]
+            if any(EXEMPTION in near for near in window):
+                continue
+            sites.append(f"{file.name}:{node.lineno}")
+    return sites
+
+
 def test_no_test_file_slips_past_the_fresh_loader() -> None:
     """Wer sein Modul selbst öffnet, nimmt ``spec_from_source`` -- oder begründet es.
 
-    ``spec_from_file_location`` umgeht ``sys.meta_path`` und damit den Finder.
-    Eine neue Testdatei im alten Stil bekäme also wieder alten Bytecode, ohne
-    dass etwas rot wird -- dieselbe Fehlerklasse, gegen die diese Datei
-    angetreten ist. Am 2026-09-26 nachgestellt: eine Testdatei mit blankem
-    ``spec_from_file_location`` lud ``truma_pkg.bus`` mit dem Standardloader,
-    hinterließ ein ``.pyc`` im Produktionsbaum, und kein Test sagte etwas.
+    ``spec_from_file_location`` umgeht ``sys.meta_path`` und damit den Finder,
+    ein selbst gebauter ``SourceFileLoader`` ebenso. Eine neue Testdatei im
+    alten Stil bekäme also wieder alten Bytecode, ohne dass etwas rot wird --
+    dieselbe Fehlerklasse, gegen die diese Datei angetreten ist. Am 2026-09-26
+    nachgestellt: eine Testdatei mit blankem ``spec_from_file_location`` lud
+    ``truma_pkg.bus`` mit dem Standardloader, hinterließ ein ``.pyc`` im
+    Produktionsbaum, und kein Test sagte etwas.
 
-    Die Ausnahme steht dort, wo sie gilt, nicht in einer Liste hier: eine
+    Die Begründung steht dort, wo sie gilt, nicht in einer Liste hier: eine
     Liste, die neben der Wirklichkeit herläuft, ist genau das, was diesen
     Schutz überhaupt nötig gemacht hat.
     """
-    exemption = "fresh-import-exempt:"
-    offenders = []
-    for file in sorted(Path(__file__).resolve().parent.glob("test_*.py")):
-        text = file.read_text(encoding="utf-8")
-        lines = text.splitlines()
-        # Über den Syntaxbaum, nicht per Textsuche: sonst fände dieser Test
-        # die Namen in seinem eigenen Quelltext und in seiner Fehlermeldung.
-        for node in ast.walk(ast.parse(text)):
-            called = getattr(node, "func", None)
-            if not isinstance(node, ast.Call) or not isinstance(called, ast.Attribute):
-                continue
-            if called.attr != "spec_from_file_location":
-                continue
-            # Die Markierung steht in der Zeile selbst oder kurz darüber.
-            window = lines[max(0, node.lineno - 4):node.lineno]
-            if any(exemption in near for near in window):
-                continue
-            offenders.append(f"{file.name}:{node.lineno}")
-
-    assert not offenders, (
-        f"diese Stellen öffnen ein Modul am frischen Loader vorbei: {offenders}. "
-        "stubs.spec_from_source nehmen -- oder, wenn dort kein Integrationsmodul "
-        f"geladen wird, die Zeile mit '# {exemption} <Grund>' ausnehmen"
+    sites = _bare_loader_sites(TESTS)
+    assert not sites, (
+        f"diese Stellen bauen ihren Loader am frischen vorbei: {sites}. "
+        "stubs.spec_from_source nehmen -- oder, wenn dort kein "
+        f"Integrationsmodul geladen wird, mit '# {EXEMPTION} <Grund>' in der "
+        "Zeile darüber ausnehmen"
     )
+
+
+def test_the_watchdog_catches_every_way_around_it() -> None:
+    """Den Wächter selbst prüfen, an Wegwerfdateien statt am Verzeichnis.
+
+    Sonst prüft ihn nur die Wirklichkeit in ``tests/``: solange dort niemand
+    eine der Umgehungen schreibt, sähe niemand, dass er sie nicht fängt. Alle
+    fünf Schreibweisen hier sind gemessene Fälle -- vier davon rutschten
+    durch, als der Wächter noch auf die Knotenart statt auf den Namen sah.
+    """
+    ways = {
+        "test_way_attribute.py":
+            "import importlib.util\n"
+            "importlib.util.spec_from_file_location('m', 'f')\n",
+        "test_way_module_alias.py":
+            "import importlib.util as iu\n"
+            "iu.spec_from_file_location('m', 'f')\n",
+        "test_way_from_import.py":
+            "from importlib.util import spec_from_file_location\n"
+            "spec_from_file_location('m', 'f')\n",
+        "test_way_function_alias.py":
+            "import importlib.util\n"
+            "_open = importlib.util.spec_from_file_location\n"
+            "_open('m', 'f')\n",
+        "test_way_raw_loader.py":
+            "import importlib.machinery\n"
+            "importlib.machinery.SourceFileLoader('m', 'f')\n",
+    }
+    with tempfile.TemporaryDirectory() as tmp:
+        directory = Path(tmp)
+        for name, source in ways.items():
+            (directory / name).write_text(source, encoding="utf-8")
+
+        seen = {site.split(":")[0] for site in _bare_loader_sites(directory)}
+        assert seen == set(ways), (
+            f"der Wächter übersieht {sorted(set(ways) - seen)} -- diese "
+            "Schreibweise käme an ihm vorbei"
+        )
+
+        # Und eine Markierung nimmt nur ihre eigene Stelle aus, nicht die
+        # folgenden: davor deckte sie bis zu drei weitere Aufrufe mit ab.
+        (directory / "test_way_bleed.py").write_text(
+            "import importlib.util\n"
+            f"# {EXEMPTION} nur diese eine Stelle\n"
+            "importlib.util.spec_from_file_location('a', 'a')\n"
+            "importlib.util.spec_from_file_location('b', 'b')\n",
+            encoding="utf-8")
+        bled = [s for s in _bare_loader_sites(directory)
+                if s.startswith("test_way_bleed")]
+        assert bled == ["test_way_bleed.py:4"], (
+            f"die Markierung deckt die falsche Menge ab: {bled} -- erwartet "
+            "nur die zweite, unbegründete Stelle"
+        )
+
+
+def test_the_suite_refuses_to_run_without_assertions() -> None:
+    """Unter ``-O`` muss der Lauf abbrechen, nicht bestehen.
+
+    CPython entfernt dann jede ``assert``-Anweisung, und die Prüfungen hier
+    sind ausschließlich solche. Am 2026-09-26 gemessen: ohne die Sperre in
+    ``stubs`` meldete eine Datei mit ``assert False`` unter ``-O`` "all checks
+    OK" und endete mit Rückgabewert 0 -- grün und wertlos zugleich, der
+    schlimmere der beiden Ausfälle. Ein Unterprozess, weil dieser Prozess
+    seine eigenen Assertions nicht abschalten kann.
+    """
+    for flag in ("-O", "-OO"):
+        done = subprocess.run(
+            [sys.executable, flag, "-c",
+             f"import sys; sys.path.insert(0, {str(TESTS)!r}); import stubs"],
+            capture_output=True, text=True,
+        )
+        assert done.returncode != 0, (
+            f"der Import von stubs endet unter {flag} mit 0. Dann läuft die "
+            "ganze Suite ohne aktive assert-Anweisungen durch und meldet "
+            "Erfolg, ohne etwas geprüft zu haben -- siehe die Sperre in stubs"
+        )
+        assert "assert" in done.stderr, (
+            f"unter {flag} bricht der Import ab, aber die Meldung nennt den "
+            f"Grund nicht: {done.stderr.strip()!r}"
+        )
 
 
 def test_the_production_tree_is_untouched() -> None:

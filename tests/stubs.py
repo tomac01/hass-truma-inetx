@@ -31,6 +31,18 @@ from typing import TypedDict
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "custom_components" / "truma_inetx"
 
+# Ein Lauf unter ``-O`` wäre wertlos: CPython entfernt dann jede
+# ``assert``-Anweisung, und die Prüfungen hier sind ausschließlich solche.
+# Gemessen am 2026-09-26: eine Datei mit ``assert False`` meldet unter ``-O``
+# "all checks OK" und endet mit Rückgabewert 0. Lieber laut abbrechen als
+# still bestehen -- das gilt für jede Testdatei, denn alle importieren dies.
+if not __debug__:
+    raise SystemExit(
+        "Dieser Testlauf braucht aktive assert-Anweisungen. Unter -O, -OO oder "
+        "PYTHONOPTIMIZE entfernt CPython sie, und jede Prüfung hier bestünde, "
+        "ohne etwas geprüft zu haben. Ohne -O laufen lassen."
+    )
+
 
 def mod(name: str, **attrs) -> ModuleType:
     """Register a module under ``name`` carrying ``attrs``."""
@@ -379,25 +391,33 @@ class _FreshFinder:
     2026-09-26 bei 31 der damals 41 Testdateien, erkennbar daran, dass sie
     ``__pycache__``-Einträge für Integrationsmodule hinterließen, obwohl
     ``AlwaysFresh`` keine schreibt. Dieser Finder sitzt vor dem normalen und
-    beantwortet jedes Modul, das er auf dem ``__path__`` des Elternpakets
-    findet, mit einem ``AlwaysFresh``.
+    beantwortet jede Quelldatei, die er auf dem ``__path__`` des Elternpakets
+    findet, mit einem ``AlwaysFresh``. Was er nicht findet -- ein
+    Namespace-Paket, ein Erweiterungsmodul, reiner Bytecode ohne Quelle --
+    reicht er weiter; dort gibt es auch nichts frisch zu übersetzen.
 
     Gestubbte Module erreichen ihn nie: was schon in ``sys.modules`` steht,
     wird gar nicht erst gesucht.
     """
 
+    # Kennung für die Registrierung unten. Über den Namen zu prüfen wäre von
+    # außen nachahmbar: ein fremder Finder, der zufällig so heißt, hätte den
+    # Schutz still ausgeschaltet.
+    _truma_fresh_loader = True
+
     @staticmethod
     def find_spec(fullname: str, path=None, target=None):
-        """Eine Integrationsdatei unter ``path`` finden, sonst weiterreichen."""
+        """Eine Quelldatei unter ``path`` finden, sonst weiterreichen."""
         if not fullname.startswith("truma_pkg."):
             return None
         tail = fullname.rpartition(".")[2]
         for entry in path or ():
-            # Unterpaket zuerst, wie ``FileFinder`` es auch hält: lägen
-            # ``foo/`` und ``foo.py`` nebeneinander, gewinnt das Paket.
-            # ``submodule_search_locations`` muss niemand setzen --
-            # ``spec_from_file_location`` fragt den Loader, und
-            # ``SourceFileLoader.is_package`` erkennt ein ``__init__``.
+            # Unterpaket zuerst, wie ``FileFinder`` es auch hält: läge
+            # neben ``foo.py`` ein ``foo/`` mit ``__init__.py``, gewinnt das
+            # Paket -- ohne ``__init__.py`` gewinnt das Modul.
+            # ``submodule_search_locations`` muss niemand setzen:
+            # ``spec_from_file_location`` fragt den Loader, und dessen
+            # ``is_package`` erkennt ein ``__init__`` von selbst.
             for candidate in (Path(entry) / tail / "__init__.py",
                               Path(entry) / f"{tail}.py"):
                 if candidate.is_file():
@@ -408,9 +428,9 @@ class _FreshFinder:
 # Beim Import, nicht auf Zuruf: ein Schutz, den eine Testdatei erst anfordern
 # muss, fehlt genau dort, wo jemand das Anfordern vergessen hat. Zwei Tests
 # laden ohne ``install_homeassistant``, dort wäre er sonst nicht da. Geprüft
-# wird über den Namen, nicht über das Klassenobjekt: ein zweiter Import von
+# wird über die Kennung, nicht über das Klassenobjekt: ein zweiter Import von
 # ``stubs`` unter anderem Modulnamen legte sonst einen zweiten Eintrag.
-if not any(getattr(f, "__qualname__", None) == "_FreshFinder" for f in sys.meta_path):
+if not any(getattr(f, "_truma_fresh_loader", False) for f in sys.meta_path):
     sys.meta_path.insert(0, _FreshFinder)
 
 
