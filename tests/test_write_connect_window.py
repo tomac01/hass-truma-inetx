@@ -87,7 +87,7 @@ class _SlowClient(_Client):
 class _Coord:
     """Nur so viel Coordinator, wie der Wartepfad und der Abbau anfassen."""
 
-    unique_id = "Truma iNetX-15E02F"
+    unique_id = "Truma iNetX-FFB4D1"
 
     def __init__(self, *, poll_interval: int = 300) -> None:
         self.poll_interval = poll_interval
