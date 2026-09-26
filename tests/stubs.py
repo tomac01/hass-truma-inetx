@@ -127,6 +127,17 @@ class CoordinatorEntity:
         """
         return self._attr_unique_id
 
+    @property
+    def has_entity_name(self):
+        """Dasselbe für die Namensbildung, die daran hängt.
+
+        Home Assistant setzt den Anzeigenamen aus Gerätename und
+        Entitätsname zusammen, solange das hier wahr ist -- und nur dann darf
+        eine Entität ``_attr_name = None`` führen, um den Gerätenamen allein
+        zu tragen. Die Klimaentität tut genau das.
+        """
+        return getattr(self, "_attr_has_entity_name", False)
+
 
 class _Coordinator:
     """DataUpdateCoordinator, which is only ever subscripted and subclassed."""

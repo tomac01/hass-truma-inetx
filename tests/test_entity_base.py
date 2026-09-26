@@ -161,7 +161,43 @@ def test_an_entity_that_reports_the_link_itself_stays_available() -> None:
     assert _Ungated(coordinator, HEATER, "link").available is True
 
 
-# -- 3. die Adresse, wenn der Aufrufer eine nennt ---------------------------
+# -- 3. der Gerätename im Entitätsnamen ------------------------------------
+
+
+def test_an_entity_carries_its_device_name() -> None:
+    """``has_entity_name`` ist die Voraussetzung für alles, was danach kommt.
+
+    Home Assistant setzt den Anzeigenamen aus Gerätename und Entitätsname
+    zusammen, solange das wahr ist. Ist es das nicht, heisst jede Entität nur
+    noch nach ihrem Parameter -- auf einem Fahrzeug mit zwei Heizkreisen
+    zweimal gleich, und welche zu welchem Gerät gehört, steht nirgends mehr.
+    """
+    coordinator = _coordinator()
+    coordinator.report("Identify", "Name", "Combi 6 E", HEATER)
+    coordinator.report("AirHeating", "Temp", 228, HEATER)
+    assert CLIMATE.TrumaClimate(coordinator, HEATER).has_entity_name is True
+
+
+def test_the_climate_entity_may_go_nameless_because_of_it() -> None:
+    """Die Kopplung, die daran hängt, und der Grund, warum sie zusammen steht.
+
+    Die Klimaentität führt ``_attr_name = None`` und trägt damit den
+    Gerätenamen allein -- das ist nur zulässig, solange ``has_entity_name``
+    wahr ist. Fiele es weg, bliebe eine Entität ohne jeden Namen übrig. Die
+    beiden gehören darum in eine Prüfung.
+    """
+    coordinator = _coordinator()
+    coordinator.report("Identify", "Name", "Combi 6 E", HEATER)
+    coordinator.report("AirHeating", "Temp", 228, HEATER)
+    climate = CLIMATE.TrumaClimate(coordinator, HEATER)
+
+    assert climate._attr_name is None, "die Klimaentität trägt den Gerätenamen"
+    assert climate.has_entity_name is True, (
+        "_attr_name = None ohne has_entity_name lässt die Entität namenlos"
+    )
+
+
+# -- 4. die Adresse, wenn der Aufrufer eine nennt ---------------------------
 
 
 def test_a_named_address_gets_the_entity_and_the_others_do_not() -> None:

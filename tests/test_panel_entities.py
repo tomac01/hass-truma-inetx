@@ -171,6 +171,38 @@ def test_the_reset_button_waits_for_a_fault_that_can_be_reset() -> None:
     assert coordinator.writes == [(HEATER, "ErrorReset", "Req", 1)]
 
 
+def test_the_reset_button_is_gone_while_the_link_is_down() -> None:
+    """Ein Knopf, den zu drücken nichts erreichen würde, wird nicht angeboten.
+
+    Die Prüfung darüber hält den Link absichtlich oben und sieht deshalb nur
+    die zweite Hälfte der Bedingung. Fällt die erste weg, kehrt sich die
+    Bedienbarkeit genau um: der Knopf erscheint, *weil* nichts erreichbar ist,
+    und zwar auch dann, wenn gar kein Fehler anliegt -- er ist dann das
+    einzige, was die Karte noch anbietet, und er tut nichts.
+    """
+    coordinator = _coordinator()
+    made = stubs.setup_platform(BUTTON, coordinator)
+    coordinator.report("ErrorReset", "Req", 0, HEATER)
+    button = _by_key(made, "error_reset")
+
+    # Ein zurücksetzbarer Fehler liegt an -- daran soll es nicht liegen.
+    coordinator.report(
+        "ErrorReset", "ErrCode", [{"sev": 2, "code": 500, "resettable": 1}], HEATER
+    )
+    coordinator.data.connected = True
+    assert button.available is True, "Voraussetzung: mit Link ist der Knopf da"
+
+    coordinator.data.connected = False
+    assert button.available is False, (
+        "Reset angeboten, obwohl der Druck das Gerät nicht erreicht"
+    )
+
+    # Und ohne Fehler erst recht nicht -- der Fall, in dem die vertauschte
+    # Bedingung den Knopf als einziges Bedienelement übrig liesse.
+    coordinator.report("ErrorReset", "ErrCode", [], HEATER)
+    assert button.available is False
+
+
 def test_the_timer_can_be_switched_off_from_here() -> None:
     coordinator = _coordinator()
     made = stubs.setup_platform(SWITCH, coordinator)
