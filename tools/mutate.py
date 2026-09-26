@@ -8,10 +8,18 @@ dieses Werkzeug liefert die Liste, nicht das Urteil.
 
 Warum es im Repo liegt. Am 2026-09-26 lag die Erkennungsquote bei 62,2 %, und
 niemand wusste das, weil es kein Werkzeug gab, das nachmisst. Nach dem
-Schließen von 97 Lücken sind es 74,3 % (siehe ``REFERENCE`` unten). Ohne ein
-Werkzeug im Baum ist diese Zahl eine Behauptung in einem Sitzungsprotokoll:
-Sie kann fallen, und niemand merkt es. Genau dieselbe Lage wie bei den vier
-Prüfungen, die damals "alles in Ordnung" sagten, ohne etwas zu prüfen.
+Schließen von 97 Lücken waren es 74,3 %, nach weiteren 41 sind es 78,4 %
+(siehe ``REFERENCE`` unten). Ohne ein Werkzeug im Baum ist diese Zahl eine
+Behauptung in einem Sitzungsprotokoll: Sie kann fallen, und niemand merkt es.
+Genau dieselbe Lage wie bei den vier Prüfungen, die damals "alles in Ordnung"
+sagten, ohne etwas zu prüfen.
+
+Sechs Module stehen auf 100 %: binary_sensor, button, diagnostics, entity,
+proxy und switch. Die Arbeit lohnt von unten: ``bt.py`` (54 %), ``ble.py``
+(57 %) und ``pairing.py`` (58 %) tragen zusammen mehr Überlebende als alles
+darüber. Dort ersetzen die Tests vielfach genau das, was zu prüfen wäre --
+``client_is_proxy`` wird von jedem Pairing-Test durch ein Lambda ersetzt und
+läuft nie.
 
 Zwei Eigenheiten, die das Messen hier überhaupt erst ehrlich machen:
 
@@ -61,7 +69,7 @@ TESTS = ROOT / "tests"
 # Die letzte dokumentierte Messung. Ein Lauf stellt sich dagegen, damit ein
 # Rückschritt auffällt statt unbemerkt zu bleiben -- siehe
 # docs/REV-005-abdeckung-mutationstest.md im Proxy-Projekt.
-REFERENCE = {"date": "2026-09-26", "caught": 733, "total": 987}
+REFERENCE = {"date": "2026-09-26", "caught": 774, "total": 987}
 
 # Tests, die Quelldateien mit ``ast`` lesen statt sie zu importieren. Sie sehen
 # eine Mutation, ohne das Modul zu laden, und laufen darum immer mit.
