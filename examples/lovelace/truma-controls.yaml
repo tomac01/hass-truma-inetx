@@ -11,12 +11,12 @@ cards:
         show_name: true
         show_state: true
       - type: entity
-        entity: binary_sensor.truma_inetx_ffb4d1_ble_connection
+        entity: binary_sensor.truma_inetx_ffb4d1_ble_truma_verbindung
         name: BLE-Truma
         show_name: true
         show_state: true
       - type: entity
-        entity: binary_sensor.truma_inetx_ffb4d1_flame
+        entity: binary_sensor.truma_inetx_ffb4d1_heizung
         show_name: false
         show_state: true
 
@@ -110,8 +110,8 @@ cards:
         - type: select-options
 
   - type: tile
-    entity: select.truma_inetx_ffb4d1_electric_heating_output
-    name: Elektrische Heizleistung
+    entity: select.truma_inetx_ffb4d1_elektrische_heizung
+    name: Elektrische Heizung
     icon: mdi:flash
     tap_action:
       action: more-info

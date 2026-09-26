@@ -36,9 +36,9 @@
     }
   },
   "issues": {
-    "no_proxy_route": {
-      "title": "Nothing can reach the Truma panel",
-      "description": "Home Assistant can hear the Truma panel advertising, but nothing is able to connect to it.\n\nThe panel uses a rotating Bluetooth private address. Reconnecting to it requires the panel's current address to be put on air. An ESPHome Bluetooth proxy's controller does that for you, and so does a Linux kernel below 6.19. From 6.19 onwards the kernel puts the panel's identity address on air instead, and the panel does not answer it; a local adapter then only works if its controller supports LL Privacy and BlueZ has programmed the panel's key into the resolving list, which it currently does not do. A kernel fix for this is posted upstream and not yet merged.\n\n**On kernel 6.19 or later, add an ESPHome Bluetooth proxy within range of the panel.**\n\nIf you already have one, check that it is online and that the panel is in range of it."
+    "no_route": {
+      "title": "Nothing can connect to the Truma panel",
+      "description": "Home Assistant can hear the Truma panel advertising, but none of the Bluetooth adapters or proxies it has can connect to it.\n\nThe panel uses a rotating Bluetooth private address, and it only answers a connect that puts its *current* address on air. Whether that happens depends on the host:\n\n- A Linux kernel below 6.19 does it in software, so a plain local adapter works.\n- From 6.19 onwards the kernel sends the panel's identity address instead, which the panel does not answer. A local adapter then only works if its controller supports LL Privacy and BlueZ has programmed the panel's key into the resolving list, which it currently does not do for this kind of bond. A kernel fix is posted upstream and not yet merged.\n- An ESPHome Bluetooth proxy's controller does it itself, on any host.\n\nCheck that the panel is in range of whichever of these you have, and that nothing else is holding a connection to it. Note that a bond lives on the adapter it was made with: if the adapter or proxy that paired the panel is no longer there, the panel has to be paired again.\n\nHome Assistant chooses which adapter or proxy to connect through by itself; this integration does not pin the panel to one."
     }
   },
   "entity": {
@@ -46,14 +46,40 @@
       "connection": {
         "name": "BLE Truma connection"
       },
-      "proxy_connection": {
-        "name": "BLE transmitter connection"
+      "cooling_active": {
+        "name": "Cooling"
       },
-      "flame": {
-        "name": "Flame"
+      "demo_mode": {
+        "name": "Demo mode"
+      },
+      "error": {
+        "name": "Fault"
       },
       "gas": {
         "name": "Gas"
+      },
+      "heating_active": {
+        "name": "Heating"
+      },
+      "line_power": {
+        "name": "Shore power"
+      },
+      "needs_energy": {
+        "name": "Requesting energy"
+      },
+      "proxy_connection": {
+        "name": "BLE transmitter connection"
+      }
+    },
+    "button": {
+      "error_reset": {
+        "name": "Reset fault"
+      },
+      "manual_stop": {
+        "name": "End live mode"
+      },
+      "manual_sync": {
+        "name": "Sync now / start live mode"
       }
     },
     "number": {
@@ -62,17 +88,27 @@
       },
       "manual_live_minutes": {
         "name": "Live mode duration"
-      }
-    },
-    "button": {
-      "manual_sync": {
-        "name": "Sync now / start live mode"
       },
-      "manual_stop": {
-        "name": "End live mode"
+      "panel_brightness": {
+        "name": "Display brightness"
+      },
+      "panel_display_timeout": {
+        "name": "Display timeout"
+      },
+      "panel_night_brightness": {
+        "name": "Night brightness"
       }
     },
     "select": {
+      "air_mode": {
+        "name": "Heating mode"
+      },
+      "cooling_mode": {
+        "name": "Cooling level"
+      },
+      "electric_level": {
+        "name": "Electric heating"
+      },
       "energy_source": {
         "name": "Energy source",
         "state": {
@@ -82,14 +118,84 @@
           "changing": "Changing …"
         }
       },
-      "electric_level": {
-        "name": "Electric heating output"
-      },
       "water_mode": {
         "name": "Water heating"
       }
     },
     "sensor": {
+      "battery_level": {
+        "name": "Sensor battery"
+      },
+      "ble_conn_state": {
+        "name": "Connection state"
+      },
+      "ble_free_slots": {
+        "name": "Free slots"
+      },
+      "ble_mgmt_state": {
+        "name": "State"
+      },
+      "climate_state": {
+        "name": "Climate state (raw)"
+      },
+      "cooling_status": {
+        "name": "Cooling status",
+        "state": {
+          "off": "Off",
+          "running": "Cooling",
+          "idle": "Idle"
+        }
+      },
+      "cooling_temp": {
+        "name": "Cooling temperature"
+      },
+      "current_temp": {
+        "name": "Room temperature"
+      },
+      "error_code": {
+        "name": "Fault code"
+      },
+      "faster_water_heating_time": {
+        "name": "Faster water heating time"
+      },
+      "fault_reset_window": {
+        "name": "Fault reset window"
+      },
+      "fresh_water_level": {
+        "name": "Fresh water"
+      },
+      "gas_bottle_contents": {
+        "name": "Gas bottle contents"
+      },
+      "gas_bottle_level": {
+        "name": "Gas bottle level"
+      },
+      "gas_bottle_rem_time": {
+        "name": "Gas bottle remaining (raw)"
+      },
+      "gas_bottle_temp": {
+        "name": "Gas bottle temperature"
+      },
+      "grey_water_level": {
+        "name": "Grey water"
+      },
+      "heating_status": {
+        "name": "Heating status",
+        "state": {
+          "off": "Off",
+          "running": "Running",
+          "idle": "Idle"
+        }
+      },
+      "internal_temp": {
+        "name": "Internal temperature"
+      },
+      "leisure_battery_voltage": {
+        "name": "Leisure battery"
+      },
+      "logic_supply": {
+        "name": "Logic supply"
+      },
       "operation": {
         "name": "Operation",
         "state": {
@@ -99,29 +205,26 @@
           "error": "Error"
         }
       },
-      "current_temp": {
-        "name": "Room temperature"
+      "panel_clock": {
+        "name": "Panel clock"
       },
-      "faster_water_heating_time": {
-        "name": "Faster water heating time"
+      "panel_idle": {
+        "name": "Time since last touched"
       },
-      "flame_status": {
-        "name": "Flame status"
-      },
-      "fresh_water_level": {
-        "name": "Fresh water"
-      },
-      "grey_water_level": {
-        "name": "Grey water"
-      },
-      "internal_temp": {
-        "name": "Internal temperature"
-      },
-      "leisure_battery_voltage": {
-        "name": "Leisure battery"
+      "power_mode": {
+        "name": "Power mode (raw)"
       },
       "starter_battery_voltage": {
         "name": "Starter battery"
+      },
+      "temperature_source": {
+        "name": "Temperature source (raw)"
+      },
+      "timer_schedule": {
+        "name": "Timer {slot} schedule"
+      },
+      "timers_enabled": {
+        "name": "Timers enabled"
       },
       "voltage": {
         "name": "Supply voltage"
@@ -131,8 +234,20 @@
       }
     },
     "switch": {
+      "diesel": {
+        "name": "Diesel burner"
+      },
       "faster_water_heating": {
         "name": "Faster water heating"
+      },
+      "panel_screensaver": {
+        "name": "Screensaver"
+      },
+      "timer": {
+        "name": "Timer {slot}"
+      },
+      "water_autofill": {
+        "name": "Refill mode"
       },
       "water_boost": {
         "name": "Water boost"

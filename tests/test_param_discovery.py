@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Offline checks for the startup sequence: registration, then discovery.
 
-No hardware, no Home Assistant install: the HA/bleak imports are stubbed so the
-real ``coordinator._run_startup``, ``coordinator._discover_params`` and
+No hardware, no Home Assistant install: the HA imports are stubbed so the
+real ``session.run_startup``, ``session.discover_params`` and
 ``coordinator._on_frame`` run, and the frames they emit are parsed back with
 the real ``truma.protocol``.
 
@@ -27,8 +27,13 @@ What it pins:
    feeding the directed round,
 5. discovery is reached from ``_run_startup``, and asking a dozen devices does
    not cost a dozen multi-second waits,
-6. and a link that connects but never answers registration is dropped at once
-   rather than carrying on into a startup that cannot work.
+6. a link that connects but never answers registration is dropped at once
+   rather than carrying on into a startup that cannot work,
+7. a discovery that not one address acknowledges is dropped too -- the same
+   failure one step later, and the one the registration gate cannot see,
+8. and a startup that hangs somewhere none of those gates can see is dropped
+   on a deadline of its own, because the stall watchdog does not start until
+   startup has finished.
 
 Run: ``python3 tests/test_param_discovery.py`` (needs ``cbor2``).
 """
@@ -36,12 +41,12 @@ Run: ``python3 tests/test_param_discovery.py`` (needs ``cbor2``).
 from __future__ import annotations
 
 import asyncio
-import importlib.util
 import sys
 import types
 from pathlib import Path
 
-SRC = Path(__file__).resolve().parents[1] / "custom_components" / "truma_inetx"
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import stubs  # noqa: E402
 
 # Addresses measured on the reporter's vehicle. They are what the seed has to
 # cover; the point of naming them here is that a seed narrowed back to the
@@ -57,66 +62,16 @@ UNSEEDED = 0x0801
 APP_ADDR = 0x0501
 
 
-def _mod(name: str, **attrs):
-    module = types.ModuleType(name)
-    module.__dict__.update(attrs)
-    sys.modules[name] = module
-    return module
-
-
-def _load():
-    """Import the real coordinator + truma protocol with externals stubbed."""
-    _mod("homeassistant", __path__=[])
-    _mod("homeassistant.core", HomeAssistant=object, callback=lambda f: f)
-    _mod("homeassistant.config_entries", ConfigEntry=dict)
-    _mod("homeassistant.exceptions", HomeAssistantError=RuntimeError)
-    _mod("homeassistant.helpers", __path__=[], issue_registry=types.SimpleNamespace(
-        async_create_issue=lambda *a, **kw: None,
-        async_delete_issue=lambda *a, **kw: None,
-        IssueSeverity=types.SimpleNamespace(WARNING="warning"),
-    ))
-    _mod("homeassistant.helpers.storage", Store=object)
-    _mod("bleak_retry_connector", BleakClientWithServiceCache=object,
-         establish_connection=None)
-
-    class _Coordinator:
-        """DataUpdateCoordinator stand-in that tolerates [TrumaState]."""
-
-        def __class_getitem__(cls, _item):
-            return cls
-
-    _mod("homeassistant.helpers.update_coordinator", DataUpdateCoordinator=_Coordinator)
-
-    _mod("truma_pkg", __path__=[str(SRC)])
-    _mod("truma_pkg.truma", __path__=[str(SRC / "truma")])
-    # The transport is not exercised here -- the fake client below stands in
-    # for it -- but bt.py drags in HA's bluetooth component, so stub it whole.
-    _mod("truma_pkg.ble", TrumaBleClient=object, device_from_bluez=None)
-    _mod("truma_pkg.bt", async_panel_advertising=lambda *a: False,
-         async_remote_scanner_source=lambda *a: None,
-         async_resolve_proxy_device=None, async_wait_until_heard=None)
-    _mod("truma_pkg.proxy", TrumaProxyTracker=object)
-
-    def _real(name: str, package: str = "truma_pkg", path: Path = SRC):
-        spec = importlib.util.spec_from_file_location(
-            f"{package}.{name}", path / f"{name}.py"
-        )
-        assert spec is not None and spec.loader is not None
-        module = importlib.util.module_from_spec(spec)
-        sys.modules[f"{package}.{name}"] = module
-        spec.loader.exec_module(module)
-        return module
-
-    # Real, in dependency order: protocol.py does `from .const import ...`.
-    truma_const = _real("const", "truma_pkg.truma", SRC / "truma")
-    protocol = _real("protocol", "truma_pkg.truma", SRC / "truma")
-    state = _real("state", "truma_pkg.truma", SRC / "truma")
-    _real("const")
-    coordinator = _real("coordinator")
-    return truma_const, protocol, state, coordinator
-
-
-TC, PROTO, STATE, COORD = _load()
+stubs.install_homeassistant()
+# The transport is not exercised here -- the fake client below stands in for
+# it -- but bt.py drags in HA's bluetooth component, so stub it whole.
+stubs.stub_transport()
+TC = stubs.load_truma("const")
+PROTO = stubs.load_truma("protocol")
+BUS = stubs.load("bus")
+stubs.load("const")
+SESSION = stubs.load("session")
+COORD = stubs.load("coordinator")
 
 
 class _NoSleep:
@@ -146,11 +101,14 @@ class _Client:
 
     def __init__(self, coord, answers: dict[int, int] | None = None) -> None:
         self.assigned_addr = APP_ADDR
+        # A link that carries nothing is still connected as far as the stack
+        # is concerned; only the transport giving up clears this.
+        self.connected = True
         self.sent: list[bytes] = []
         self._coord = coord
         self._answers = answers or {}
 
-    async def send(self, frame: bytes) -> bool:
+    async def send(self, frame: bytes, *, probe: bool = False) -> bool:
         self.sent.append(frame)
         parsed = PROTO.parse_v3_frame(frame)
         speaker = self._answers.get(parsed["dest"])
@@ -166,12 +124,16 @@ class _Coord:
 
     hass = types.SimpleNamespace(loop=types.SimpleNamespace(time=lambda: 0.0))
     unique_id = "Truma iNetX-FFB4D1"
+    # The registration response is handed the transport so it can record the
+    # address the panel assigned; the fake client below is created per test.
+    _client = None
 
     def __init__(self) -> None:
-        self._state = STATE.TrumaState()
+        self._bus = BUS.Bus()
         self._last_frame = 0.0
-        self._writes_pending = 0
-        self._write_ready_event = asyncio.Event()
+        # Kein Rückmeldungsbuch: hier wird nichts geschrieben, und genau
+        # daran erkennt der Frame-Pfad, dass er sich die Buchführung spart.
+        self._write_feedback = {}
         self._identity = {
             "muid": "MUID",
             "uuid": "uuid",
@@ -181,28 +143,39 @@ class _Coord:
     def async_set_updated_data(self, _data) -> None:
         pass
 
-    _discover_params = COORD.TrumaCoordinator._discover_params
     _run_startup = COORD.TrumaCoordinator._run_startup
     _on_frame = COORD.TrumaCoordinator._on_frame
-    # _on_frame keeps whatever the panel says a parameter is, beside its
-    # value; nothing here reads it, but the frames still travel through it.
-    _learn_param = COORD.TrumaCoordinator._learn_param
+    # Seit ein Schreibvorgang auf die Antwort des Geräts wartet, bietet der
+    # Frame-Pfad jeden Wert einer wartenden Bestätigung an. Ohne die beiden
+    # wäre dies nicht mehr der Pfad, auf dem der Coordinator läuft.
+    _note_frame_values = COORD.TrumaCoordinator._note_frame_values
+    on_frame_value = COORD.TrumaCoordinator.on_frame_value
     # Startup ends by asking the on-demand sensors to measure. Nothing here
     # reports a tank, so it sends nothing -- which is the point: this file is
     # about discovery, and tests/test_measure_request.py owns that step.
     _request_measurements = COORD.TrumaCoordinator._request_measurements
 
 
+def _discover(coord, client):
+    """The real discovery pass, which is HA-free and takes its bus directly."""
+    return SESSION.discover_params(
+        client, coord._bus, coord.unique_id, coord.hass.loop.time
+    )
+
+
 def _run(coro):
     """Run a coroutine with instant sleeps, returning the recorded delays."""
-    # setattr/getattr rather than attribute syntax: COORD is built by
-    # importlib, so a type checker has no idea what is on it.
-    real, shim = getattr(COORD, "asyncio"), _NoSleep()
-    setattr(COORD, "asyncio", shim)
+    # setattr/getattr rather than attribute syntax: both modules are built by
+    # importlib, so a type checker has no idea what is on them.
+    shim = _NoSleep()
+    real = {mod: getattr(mod, "asyncio") for mod in (COORD, SESSION)}
+    for mod in real:
+        setattr(mod, "asyncio", shim)
     try:
         asyncio.run(coro)
     finally:
-        setattr(COORD, "asyncio", real)
+        for mod, value in real.items():
+            setattr(mod, "asyncio", value)
     return shim.slept
 
 
@@ -222,7 +195,7 @@ def _discovery_dests(client: _Client) -> list[int]:
 def test_every_seeded_device_is_asked() -> None:
     coord = _Coord()
     client = _Client(coord)
-    _run(coord._discover_params(client))
+    _run(_discover(coord, client))
     dests = _discovery_dests(client)
 
     # The two that already worked must not be lost in the widening.
@@ -255,7 +228,7 @@ def test_a_device_that_speaks_is_asked_even_when_unseeded() -> None:
     client = _Client(coord, answers={TC.DEV_PANEL: UNSEEDED})
     assert UNSEEDED not in TC.DEVICE_SEED, "pick an address the seed misses"
 
-    _run(coord._discover_params(client))
+    _run(_discover(coord, client))
     assert UNSEEDED in _discovery_dests(client), (
         "a device that spoke to us was never asked for its parameters"
     )
@@ -266,7 +239,7 @@ def test_no_device_is_asked_twice() -> None:
     coord = _Coord()
     # Every seeded device answers for itself, the way a populated bus would.
     client = _Client(coord, answers={a: a for a in TC.DEVICE_SEED})
-    _run(coord._discover_params(client))
+    _run(_discover(coord, client))
 
     dests = _discovery_dests(client)
     assert len(dests) == len(set(dests)), (
@@ -279,12 +252,12 @@ def test_pseudo_addresses_are_not_devices() -> None:
     coord = _Coord()
     for src in (TC.DEV_BROADCAST, TC.DEV_MSG_BROKER):
         coord._on_frame({"src": src, "dest": APP_ADDR})
-    assert not coord._state.seen_devices, (
-        f"pseudo-addresses recorded as devices: {coord._state.seen_devices}"
+    assert not coord._bus.addresses, (
+        f"pseudo-addresses recorded as devices: {coord._bus.addresses}"
     )
 
     client = _Client(coord)
-    _run(coord._discover_params(client))
+    _run(_discover(coord, client))
     dests = _discovery_dests(client)
 
     assert TC.DEV_MSG_BROKER not in dests, "the message broker was asked"
@@ -295,7 +268,7 @@ def test_pseudo_addresses_are_not_devices() -> None:
 
     # A real device on the same path still gets recorded.
     coord._on_frame({"src": SCHAUDT_BLOCK, "dest": APP_ADDR})
-    assert coord._state.seen_devices == {SCHAUDT_BLOCK}
+    assert coord._bus.addresses == {SCHAUDT_BLOCK}
 
 
 def test_we_never_ask_ourselves() -> None:
@@ -306,16 +279,16 @@ def test_we_never_ask_ourselves() -> None:
     not a device.
     """
     coord = _Coord()
-    coord._state.assigned_addr = APP_ADDR
+    coord._bus.assigned_addr = APP_ADDR
     # A frame arriving from our own assigned address, exactly as measured.
     coord._on_frame({"src": APP_ADDR, "dest": APP_ADDR})
-    assert APP_ADDR not in coord._state.seen_devices, "recorded ourselves"
+    assert APP_ADDR not in coord._bus.addresses, "recorded ourselves"
 
     # ...and even if one slipped into the set before registration completed,
     # it must not survive as far as a discovery frame.
-    coord._state.seen_devices.add(APP_ADDR)
+    coord._bus.note_seen(APP_ADDR)
     client = _Client(coord)
-    _run(coord._discover_params(client))
+    _run(_discover(coord, client))
     assert APP_ADDR not in _discovery_dests(client), "asked ourselves"
 
 
@@ -323,7 +296,7 @@ def test_broadcast_answer_reaches_an_unseeded_device() -> None:
     """The opener earns its frame only if its answers feed the next round."""
     coord = _Coord()
     client = _Client(coord, answers={TC.DEV_BROADCAST: UNSEEDED})
-    _run(coord._discover_params(client))
+    _run(_discover(coord, client))
     assert UNSEEDED in _discovery_dests(client), (
         "a device that answered the broadcast was never asked directly"
     )
@@ -383,6 +356,30 @@ def test_a_link_that_carries_nothing_is_dropped_at_once() -> None:
     assert _discovery_dests(client) == [], "discovery ran on a dead link"
 
 
+def test_registration_gives_up_when_the_transport_ends_the_session() -> None:
+    """An invalidated transport must not be waited out for the full timeout.
+
+    ``TrumaBleClient.send`` ends the session when a transfer goes unanswered,
+    because Ready and DataAck carry no transfer identity and a late one would
+    otherwise be handed to the packet behind it. Once that has happened the
+    panel cannot assign us an address over the link, so sitting out the rest
+    of the registration timeout only holds the adapter's connection slot.
+    """
+    coord = _Coord()
+    client = _Client(coord)
+    client.assigned_addr = TC.DEV_APP_DEFAULT
+    client.connected = False
+
+    raised = None
+    try:
+        _run(coord._run_startup(client))
+    except Exception as exc:  # noqa: BLE001 - the type is HA's, stubbed here
+        raised = exc
+    assert raised is not None, "startup carried on over a link the transport dropped"
+    assert "link ended during registration" in str(raised)
+    assert _discovery_dests(client) == [], "discovery ran on a dropped link"
+
+
 def test_a_registered_link_still_runs_startup() -> None:
     """The gate must not fire on a panel that answered."""
     coord = _Coord()
@@ -392,12 +389,137 @@ def test_a_registered_link_still_runs_startup() -> None:
     assert set(TC.DEVICE_SEED) <= set(_discovery_dests(client))
 
 
+class _SilentClient(_Client):
+    """A link the panel has stopped taking frames from.
+
+    ``TrumaBleClient.send(probe=True)`` reports whether the panel acknowledged
+    the transport, and reports it by *returning False* rather than raising --
+    so from discovery's side a link that has stopped carrying traffic looks
+    exactly like a bus where nobody is home. ``acks`` is the set of addresses
+    that still answer, so a test can say which of the two it means.
+    """
+
+    def __init__(self, coord, acks: set[int] | None = None) -> None:
+        super().__init__(coord)
+        self._acks = acks or set()
+
+    async def send(self, frame: bytes, *, probe: bool = False) -> bool:
+        await super().send(frame, probe=probe)
+        return PROTO.parse_v3_frame(frame)["dest"] in self._acks
+
+
+def test_a_discovery_nothing_acknowledges_is_dropped() -> None:
+    """Measured on the van, 2026-09-15 11:57.
+
+    The link dropped while discovery was running. All 18 addresses went
+    unacknowledged -- and startup ran to completion anyway, logging "connected
+    and subscribed", resetting the reconnect backoff and persisting the
+    address kind, on a session that had learned nothing. The registration gate
+    above cannot catch this: registration had already succeeded.
+    """
+    coord = _Coord()
+    client = _SilentClient(coord)
+    assert client.assigned_addr != TC.DEV_APP_DEFAULT, "registration must pass"
+
+    raised = None
+    try:
+        _run(coord._run_startup(client))
+    except Exception as exc:  # noqa: BLE001 - the type is HA's, stubbed here
+        raised = exc
+    assert raised is not None, "startup completed on a discovery nothing answered"
+    assert "no device acknowledged" in str(raised)
+
+
+def test_one_acknowledgement_is_enough() -> None:
+    """A partial answer is the normal case, not a failure.
+
+    Most of the seed is addresses with nothing behind them -- no roof air
+    conditioner, no gas sensors -- and those go unacknowledged on every
+    healthy vehicle. Only *nothing at all* means the transport is gone, and
+    the panel is always there to answer.
+    """
+    coord = _Coord()
+    client = _SilentClient(coord, acks={TC.DEV_PANEL})
+    _run(coord._run_startup(client))
+    assert TC.DEV_HEATER in _discovery_dests(client), "discovery stopped early"
+
+
+def test_a_startup_that_hangs_is_not_waited_on_forever() -> None:
+    """Measured on the van 2026-09-15 22:45, and it is not a slow panel.
+
+    The link came up, the panel sent two frames and went quiet, and startup
+    stopped inside its first write -- BlueZ's Write Request has no timeout of
+    its own. Every gate above is a gate on an *answer*: the registration one
+    counts seconds of not being assigned an address, the discovery one counts
+    acknowledgements. None of them runs while a step is still awaiting, and
+    the stall watchdog that would have caught it only starts once startup has
+    returned. So startup is bounded as a whole as well, and the session is
+    dropped and retried rather than staying "connected" and carrying nothing.
+    """
+    coord = _Coord()
+    client = _Client(coord)
+
+    async def _never(*_args, **_kwargs):
+        await asyncio.Event().wait()
+
+    real_startup, real_timeout = SESSION.run_startup, COORD._STARTUP_TIMEOUT
+    SESSION.run_startup = _never
+    COORD._STARTUP_TIMEOUT = 0.05
+    raised = None
+    try:
+        _run(coord._run_startup(client))
+    except Exception as exc:  # noqa: BLE001 - the type is Home Assistant's
+        raised = exc
+    finally:
+        SESSION.run_startup = real_startup
+        COORD._STARTUP_TIMEOUT = real_timeout
+
+    assert raised is not None, "a startup that never finishes was waited on"
+    assert "did not finish within" in str(raised), raised
+
+
+def test_discovery_is_what_says_the_bus_has_been_described() -> None:
+    """The flag an entity waits on, set where the claim becomes true.
+
+    Everything that names a device from the bus waits for either the name or
+    the end of discovery, because a device with a value and no name yet would
+    otherwise be given an entity id built on "bus_device_0xNNNN" for good
+    (#23). Set when the whole of startup returned rather than here, a startup
+    that described the bus and then failed in a later step -- asking the tanks
+    to measure, or simply running out of its own timeout -- would leave the
+    vehicle with values, no names and therefore no entities at all.
+    """
+    coord = _Coord()
+    assert coord._bus.discovered is False, "nothing has been asked yet"
+
+    client = _Client(coord)
+    _run(coord._run_startup(client))
+    assert coord._bus.discovered is True
+
+
+def test_a_bus_nobody_answered_for_is_not_called_described() -> None:
+    """The failure path keeps the flag down, so the retry names things right.
+
+    Not one address acknowledging means the transport is gone, whatever the
+    link claims -- and the values that arrived from subscribing are a bus we
+    have not been told the names of. Releasing the entities there would stamp
+    the placeholder into their ids on the strength of a session that carried
+    nothing.
+    """
+    coord = _Coord()
+    client = _SilentClient(coord)
+
+    raised = None
+    try:
+        _run(coord._run_startup(client))
+    except Exception as exc:  # noqa: BLE001 - the type is HA's, stubbed here
+        raised = exc
+    assert raised is not None, "a bus nobody answered for was accepted"
+    assert coord._bus.discovered is False
+
+
 def _main() -> None:
-    for name, fn in sorted(globals().items()):
-        if name.startswith("test_") and callable(fn):
-            fn()
-            print(f"ok  {name}")
-    print("parameter discovery: all checks OK")
+    stubs.run_tests(globals(), "parameter discovery")
 
 
 if __name__ == "__main__":

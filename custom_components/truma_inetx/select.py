@@ -1,66 +1,77 @@
-"""Select platform for Truma iNet X water and electric heating modes."""
+"""Select platform: every bus parameter the table presents as a choice."""
 
 from __future__ import annotations
 
 from homeassistant.components.select import SelectEntity
-from homeassistant.core import HomeAssistant, callback
+from homeassistant.const import Platform
+from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from .coordinator import TrumaConfigEntry, TrumaCoordinator
-from .entity import TrumaEntity
+from .entity import (
+    TrumaEntity,
+    TrumaParamEntity,
+    async_add_rows,
+    async_add_when_all_reported,
+)
+from .profiles import Row
 
 # Entities are coordinator-driven and have no update() method, so Home
 # Assistant would create no semaphore anyway; stated explicitly.
 PARALLEL_UPDATES = 0
 
-WATER_OFF = "off"
-# Both halves on purpose (#12). A panel that shows Eco / Comfort / Hot and a
-# panel that shows 40 / 60 / 70 are the same three steps, so the name matches
-# what is written on the vehicle and the temperature says what the name means
-# to anyone whose panel does not use words. Our own text, not the panel's --
-# see _offered.
-_WATER_MODE_TO_LABEL = {0: "Eco (40 °C)", 1: "Comfort (60 °C)", 2: "Hot (70 °C)"}
-WATER_OPTIONS = {WATER_OFF: None} | {
-    label: value for value, label in _WATER_MODE_TO_LABEL.items()
-}
-
-_ELECTRIC_VALUE_TO_LABEL = {1: "900 W", 2: "1800 W"}
-ELECTRIC_OPTIONS = {label: value for value, label in _ELECTRIC_VALUE_TO_LABEL.items()}
+OFF = "off"
 
 ENERGY_DIESEL = "diesel"
 ENERGY_ELECTRIC = "electric"
 ENERGY_HYBRID = "hybrid"
 ENERGY_OPTIONS = [ENERGY_DIESEL, ENERGY_ELECTRIC, ENERGY_HYBRID]
-_ENERGY_SOURCE_PARAMS = {
-    "EnergySrc.DieselLevel", "EnergySrc.GasLevel", "EnergySrc.ElectricLevel"
+ENERGY_CHANGING = "changing"
+
+# Eintritt in Elektro oder Hybrid immer bei 900 W: 1800 W wirft an schwachen
+# Landanschlüssen den Automaten. Die höhere Stufe bleibt ein bewusster
+# zweiter Schritt über die Leistungsauswahl.
+_ENTER_ELECTRIC = 1
+
+# Beide Pegel müssen gemeldet sein, sonst gibt es die Auswahl nicht: eine
+# Combi D ohne Elektroelement beschreibt EnergySrc.ElectricLevel gar nicht.
+_REQUIRED = {("EnergySrc", "DieselLevel"), ("EnergySrc", "ElectricLevel")}
+
+# Was jede Auswahl in die beiden Hardwarepegel übersetzt.
+_ENERGY_WRITES = {
+    ENERGY_DIESEL: (1, 0),
+    ENERGY_ELECTRIC: (0, _ENTER_ELECTRIC),
+    ENERGY_HYBRID: (1, _ENTER_ELECTRIC),
 }
 
 
-def _reported_sources(state) -> set[str]:
-    """Hardware presence is independent of whether a source is active."""
-    return _ENERGY_SOURCE_PARAMS.intersection(state.raw_params)
+def _ordered_levels(diesel: int, electric: int) -> list[tuple[str, int]]:
+    """Die beiden Pegelbefehle so ordnen, dass nie beide Quellen aus sind.
 
+    Eine Transaktion heißt nicht, dass beide Pegel gleichzeitig ankommen: die
+    Befehle gehen nacheinander raus, jeder wird einzeln bestätigt, und
+    dazwischen liegen bis zu 40 Sekunden. Scheitert der zweite, bleibt stehen,
+    was der erste angerichtet hat.
 
-def _offered(state, topic: str, param: str, labels: dict) -> list:
-    """The labels for the values this panel offers, in value order.
+    Käme das Abschalten zuerst, wäre das übrig bleibende genau der Zustand,
+    den diese Auswahl verhindern soll -- eine Heizung ohne Energiequelle, ohne
+    dass irgendwo ein Fehler erschiene. Und er ist nicht unwahrscheinlich: der
+    eben abgeschaltete Brenner geht ins Nachlüften, und für diese Phase ist in
+    ``coordinator.async_write_many`` dokumentiert, dass das Panel Frames
+    quittiert, die die Heizung nicht ausführt.
 
-    The panel enumerates each parameter for the vehicle it is installed in, so
-    it is the authority on which steps exist. Its *names* for them are not
-    used: they arrive in the panel's display language, and the same three water
-    steps come back as ``40 / 60 / 70`` on one vehicle and as Eco / Comfort /
-    Hot on another (#12). Taking them as they come would make the option
-    strings -- which automations match on -- differ per vehicle and per panel
-    language. So the labels stay ours and carry both halves; only which of them
-    to show is the panel's call.
+    Also erst einschalten, dann abschalten. Keine der drei Auswahlen schaltet
+    beide Pegel ab, deshalb ist nach dem ersten Befehl immer eine Quelle an --
+    aus jedem Ausgangszustand, auch aus "beide aus", das beim Einschalten der
+    Heizung vorkommt. Der Preis ist ein kurzer Hybridbetrieb, wenn die alte
+    Quelle noch läuft: ein Zustand, den die Anlage ohnehin kennt, und der
+    schlechtere von zwei Zwischenständen ist er nicht.
 
-    A panel that describes nothing gets the full list, which is what every
-    vehicle was offered before this existed.
+    ``sorted`` ist stabil, Diesel bleibt also vor Elektro, wo beide einschalten.
     """
-    values = state.allowed_values(topic, param)
-    if values is None:
-        values = list(labels)
-    return [labels[value] for value in values if value in labels]
+    levels = [("DieselLevel", diesel), ("ElectricLevel", electric)]
+    return sorted(levels, key=lambda level: level[1] == 0)
 
 
 async def async_setup_entry(
@@ -68,172 +79,164 @@ async def async_setup_entry(
     entry: TrumaConfigEntry,
     async_add_entities: AddConfigEntryEntitiesCallback,
 ) -> None:
-    """Set up Truma select entities."""
+    """Set up Truma select entities.
+
+    Each appears on the device that publishes its parameter. The supplemental
+    electric element is an option, not standard: a Combi D has none and its
+    panel does not describe EnergySrc.ElectricLevel at all, which is how that
+    select came to be offering off / 900 W / 1800 W against hardware that can
+    do none of them.
+    """
     coordinator = entry.runtime_data
-    async_add_entities([TrumaWaterModeSelect(coordinator)])
-    added = False
-
-    @callback
-    def add_energy_controls() -> None:
-        nonlocal added
-        if added or not _reported_sources(coordinator.data):
-            return
-        added = True
-        async_add_entities([
-            TrumaEnergySourceSelect(coordinator), TrumaElectricLevelSelect(coordinator)
-        ])
-
-    add_energy_controls()
-    if not added:
-        coordinator.config_entry.async_on_unload(
-            coordinator.async_add_listener(add_energy_controls)
-        )
-
-
-class TrumaWaterModeSelect(TrumaEntity, SelectEntity):
-    """Water heating mode (off / Eco / Comfort / Hot)."""
-
-    _attr_translation_key = "water_mode"
-
-    def __init__(self, coordinator: TrumaCoordinator) -> None:
-        """Initialize."""
-        super().__init__(coordinator, "water_mode")
-
-    @property
-    def options(self) -> list[str]:
-        """Off, plus the temperature steps this panel offers."""
-        return [
-            WATER_OFF,
-            *_offered(self.data, "WaterHeating", "Mode", _WATER_MODE_TO_LABEL),
-        ]
-
-    @property
-    def current_option(self) -> str | None:
-        """Return the current water heating mode."""
-        if self.data.water_active == 0:
-            return WATER_OFF
-        if self.data.water_mode is None:
-            return None
-        return _WATER_MODE_TO_LABEL.get(self.data.water_mode)
-
-    async def async_select_option(self, option: str) -> None:
-        """Set the water heating mode."""
-        if option == WATER_OFF:
-            await self.coordinator.async_write("WaterHeating", "Active", 0)
-            return
-        await self.coordinator.async_write("WaterHeating", "Active", 1)
-        await self.coordinator.async_write("WaterHeating", "Mode", WATER_OPTIONS[option])
+    async_add_rows(
+        coordinator,
+        async_add_entities,
+        Platform.SELECT,
+        lambda addr, topic, param, row: TrumaSelect(
+            coordinator, addr, topic, param, row
+        ),
+    )
+    # ``None`` statt einer Adresse: welches Gerät die Energiepegel führt, ist
+    # nicht vorab bekannt, und eine Adresstabelle wäre nach dem nächsten
+    # Neupaaren falsch (siehe ``bus.COMMAND_DEST``). Der Preis dafür steht im
+    # Docstring von ``async_add_when_all_reported``: genau eine Auswahl für den
+    # ganzen Bus, am ersten Gerät, das beide Pegel gemeldet hat. Belegt ist nur
+    # ein Publisher -- ``EnergySrc`` kommt in ``dumps/combi4-inetx-pro/``
+    # allein von 0x0201 -- und ans Panel relayed wird nur ``RoomClimate``.
+    async_add_when_all_reported(
+        coordinator,
+        async_add_entities,
+        None,
+        _REQUIRED,
+        lambda addr: TrumaEnergySourceSelect(coordinator, addr),
+    )
 
 
-class TrumaElectricLevelSelect(TrumaEntity, SelectEntity):
-    """Electric output for multiple sources, including gas/electric on/off."""
+class TrumaSelect(TrumaParamEntity, SelectEntity):
+    """One bus parameter, chosen from the values its device offers."""
 
-    _attr_translation_key = "electric_level"
-
-    def __init__(self, coordinator: TrumaCoordinator) -> None:
-        """Initialize."""
-        super().__init__(coordinator, "electric_level")
-
-    @property
-    def _has_combined_source(self) -> bool:
-        """Use the same hardware evidence as the combined source selector."""
-        return {"EnergySrc.DieselLevel", "EnergySrc.ElectricLevel"}.issubset(
-            self.data.raw_params
-        )
-
-    @property
-    def options(self) -> list[str]:
-        """Offer only panel-declared steps when electric source choice exists."""
-        if not self._has_electric_choice:
-            return []
-        labels = _ELECTRIC_VALUE_TO_LABEL if self._has_combined_source else {
-            0: "off", **_ELECTRIC_VALUE_TO_LABEL
+    def __init__(
+        self,
+        coordinator: TrumaCoordinator,
+        addr: int,
+        topic: str,
+        param: str,
+        row: Row,
+    ) -> None:
+        """Initialize from the row."""
+        super().__init__(coordinator, addr, topic, param, row)
+        self._labels: dict[int, str] = dict(row.labels or {})
+        # Every option resolves through here, to the parameter and the value
+        # that selects it. The row's own labels are laid down first, so a
+        # device that enumerates its own off keeps it: EnergySrc.ElectricLevel
+        # names 0 "Electric off" on a gas/electric Combi, and writing that 0
+        # is what switches the element off (#28).
+        self._writes: dict[str, tuple[str, int]] = {
+            label: (param, value) for value, label in self._labels.items()
         }
-        return _offered(
-            self.data, "EnergySrc", "ElectricLevel", labels
-        )
+        # An off the parameter itself has no value for. Water heating is
+        # switched off by WaterHeating.Active while WaterHeating.Mode
+        # enumerates the three temperature steps and nothing else, so that
+        # option is ours to invent -- and it goes in beside the rest rather
+        # than being recognised by its spelling on the way back in. Home
+        # Assistant hands a select one flat list of strings and hands the same
+        # strings back, so an invented option and a label are the same kind of
+        # thing by the time it returns; a sentinel that outranked the labels
+        # is how off became unselectable on the one vehicle whose own enum
+        # offered it (#28).
+        self._off: str | None = None
+        if row.off_param is not None and OFF not in self._writes:
+            self._off = OFF
+            self._writes[OFF] = (row.off_param, 0)
 
     @property
-    def available(self) -> bool:
-        """Require multiple sources; gas/electric remains controllable at zero."""
-        return super().available and self._hardware_enabled
+    def options(self) -> list[str]:
+        """The steps this device offers, in value order, plus any invented off.
 
-    @property
-    def _has_electric_choice(self) -> bool:
-        sources = _reported_sources(self.data)
-        return len(sources) >= 2 and "EnergySrc.ElectricLevel" in sources
+        The device enumerates the parameter for the vehicle it is installed
+        in, so it is the authority on which steps exist. Its *names* for them
+        are not used: they arrive in the panel's display language, and the
+        same three water steps come back as 40 / 60 / 70 on one vehicle and as
+        Eco / Comfort / Hot on another (#12). Taking them as they come would
+        make the option strings -- which automations match on -- differ per
+        vehicle and per panel language.
 
-    @property
-    def _hardware_enabled(self) -> bool:
-        return self._has_electric_choice and (
-            not self._has_combined_source or bool(self.data.electric_level)
-        )
+        A device that describes nothing gets the whole table, which is what
+        every vehicle was offered before the panel was asked.
+        """
+        values = self.device.allowed_values(self._topic, self._param)
+        if values is None:
+            values = list(self._labels)
+        offered = [self._labels[value] for value in values if value in self._labels]
+        if self._off is None:
+            return offered
+        return [self._off, *offered]
 
     @property
     def current_option(self) -> str | None:
-        """Return the current electric heating level."""
-        if not self._has_electric_choice:
+        """The step currently selected, or off."""
+        if self._off is not None:
+            off_param, _ = self._writes[self._off]
+            if self.device.get(self._topic, off_param) == 0:
+                return self._off
+        value = self.value
+        if not isinstance(value, int):
             return None
-        if self.data.electric_level == 0:
-            return None if self._has_combined_source else "off"
-        return _ELECTRIC_VALUE_TO_LABEL.get(self.data.electric_level)
+        return self._labels.get(value)
 
     async def async_select_option(self, option: str) -> None:
-        """Set the electric heating level."""
-        if not self._hardware_enabled:
-            raise HomeAssistantError("Electric heating control is disabled for the reported sources")
-        if option not in self.options:
-            raise HomeAssistantError(f"Unsupported electric heating level: {option}")
-        if option == "off":
-            await self.coordinator.async_write("EnergySrc", "ElectricLevel", 0)
-            return
-        await self.coordinator.async_write(
-            "EnergySrc", "ElectricLevel", ELECTRIC_OPTIONS[option]
-        )
+        """Select a step, switching the function on first where it has an off."""
+        param, value = self._writes[option]
+        off_param = self.row.off_param
+        if off_param is not None and param == self._param:
+            # A step is being chosen, and this function is switched off in its
+            # own right: switch it on before saying which step. Selecting the
+            # invented off writes off_param itself, and nothing else.
+            await self.async_write(off_param, 1)
+        await self.async_write(param, value)
 
 
 class TrumaEnergySourceSelect(TrumaEntity, SelectEntity):
-    """Coordinate supported diesel/electric hardware; otherwise stay disabled."""
+    """Diesel, Elektro oder beides — als eine Entscheidung.
+
+    Diesel-Schalter und Elektro-Auswahl sind getrennt bedienbar, und damit
+    lässt sich versehentlich "beide aus" einstellen: die Heizung hat dann
+    keine Energiequelle und tut nichts, ohne dass irgendwo ein Fehler
+    erschiene. Drei Zustände können das nicht ausdrücken.
+
+    Der Upstream-Schalter ``switch.diesel`` bleibt daneben bestehen -- er ist
+    die einzige Möglichkeit, den Brenner einzeln zu schalten.
+    """
 
     _attr_translation_key = "energy_source"
-    _attr_options = ENERGY_OPTIONS
-    _attr_icon = "mdi:engine"
 
-    def __init__(self, coordinator: TrumaCoordinator) -> None:
-        """Initialize."""
-        super().__init__(coordinator, "energy_source")
-
-    @property
-    def options(self) -> list[str]:
-        """Adapt one entity as the panel reports its installed hardware."""
-        if not self._has_combined_source:
-            return []
-        return [*ENERGY_OPTIONS, "changing"] if self._changing else ENERGY_OPTIONS
-
-    @property
-    def _has_combined_source(self) -> bool:
-        return {"EnergySrc.DieselLevel", "EnergySrc.ElectricLevel"}.issubset(
-            self.data.raw_params
-        )
-
-    @property
-    def available(self) -> bool:
-        return super().available and self._has_combined_source
+    def __init__(self, coordinator: TrumaCoordinator, addr: int) -> None:
+        """Initialisieren."""
+        super().__init__(coordinator, addr, "energy_source")
 
     @property
     def _changing(self) -> bool:
         return getattr(self.coordinator, "energy_source_changing", False)
 
     @property
+    def options(self) -> list[str]:
+        """Während der Umstellung ist der Zwischenzustand ein eigener Eintrag.
+
+        Home Assistant weist jeden Zustand ab, der nicht in dieser Liste
+        steht; "changing" muss also wirklich darin auftauchen, solange es
+        gemeldet wird -- und danach wieder verschwinden, damit niemand es
+        auswählen kann.
+        """
+        return [*ENERGY_OPTIONS, ENERGY_CHANGING] if self._changing else ENERGY_OPTIONS
+
+    @property
     def current_option(self) -> str | None:
-        """Derive the user-facing source from both hardware levels."""
-        if not self._has_combined_source:
-            return None
+        """Die Quelle aus beiden Hardwarepegeln ableiten."""
         if self._changing:
-            return "changing"
-        diesel = self.data.diesel_level
-        electric = self.data.electric_level
-        if diesel is None or electric is None:
+            return ENERGY_CHANGING
+        diesel = self.device.get("EnergySrc", "DieselLevel")
+        electric = self.device.get("EnergySrc", "ElectricLevel")
+        if not isinstance(diesel, int) or not isinstance(electric, int):
             return None
         if diesel and electric:
             return ENERGY_HYBRID
@@ -241,46 +244,26 @@ class TrumaEnergySourceSelect(TrumaEntity, SelectEntity):
             return ENERGY_DIESEL
         if electric:
             return ENERGY_ELECTRIC
+        # Beide aus: genau der Zustand, den diese Auswahl nicht herstellen
+        # kann, aber vorfinden darf -- etwa wenn die Heizung ganz aus ist.
         return None
 
     async def async_select_option(self, option: str) -> None:
-        """Apply a source safely, always entering electric modes at 900 W."""
-        if not self._has_combined_source:
-            raise HomeAssistantError("Energy source control requires reported diesel and electric sources")
-        if option == "changing":
-            raise HomeAssistantError("Changing is a status, not an energy source")
-        if option not in self.options:
-            raise HomeAssistantError(f"Unsupported energy source: {option}")
-        if option == ENERGY_DIESEL:
-            commands = [
-                ("EnergySrc", "DieselLevel", 1),
-                ("EnergySrc", "ElectricLevel", 0),
-            ]
-        elif option == ENERGY_ELECTRIC:
-            commands = [
-                ("EnergySrc", "ElectricLevel", 1),
-                ("EnergySrc", "DieselLevel", 0),
-            ]
-        elif option == ENERGY_HYBRID:
-            commands = [
-                ("EnergySrc", "DieselLevel", 1),
-                ("EnergySrc", "ElectricLevel", 1),
-            ]
-        else:
-            raise ValueError(f"Unknown energy source: {option}")
+        """Beide Pegel als eine Transaktion schreiben, Einschalten zuerst.
+
+        Eine Transaktion und nicht zwei getrennte Befehle: nur so steht am
+        Ende entweder der angeforderte Zustand oder ein Fehler. Innerhalb der
+        Transaktion legt ``_ordered_levels`` die Reihenfolge fest -- dort steht
+        auch, warum sie vom Ziel abhängt.
+        """
+        if option not in _ENERGY_WRITES:
+            raise HomeAssistantError(f"Unknown energy source {option}")
+        diesel, electric = _ENERGY_WRITES[option]
         await self.coordinator.async_write_many(
-            commands, confirm=True, action="energy_source", target=option
+            [
+                (self._addr, "EnergySrc", param, value)
+                for param, value in _ordered_levels(diesel, electric)
+            ],
+            action="energy_source",
+            target=option,
         )
-        # Only after fresh device feedback confirmed the complete setting.
-        # Entities not yet attached to HA cannot create a device activity entry.
-        if (hass := getattr(self, "hass", None)) is not None:
-            german = hass.config.language.startswith("de")
-            label = {"diesel": "Diesel", "electric": "Elektro" if german else "Electric", "hybrid": "Hybrid"}[option]
-            message = (
-                f"Von der Truma bestätigt: Energiequelle {label}"
-                if german else f"Confirmed by Truma: energy source {label}"
-            )
-            hass.bus.async_fire("logbook_entry", {
-                "name": "Truma", "message": message,
-                "entity_id": self.entity_id, "domain": "select",
-            })

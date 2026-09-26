@@ -2,12 +2,15 @@
 
 [English](#english)
 
+> Beim Umstieg von 0.7.3-live.x ändern sich **alle Entity-IDs**, und es
+> gibt keine Migration: [Umstieg auf 0.9](upgrading-fork.md).
+
 ## Verbindung und Aktualisierung
 
 - **BLE-Sender-Verbindung**: Home Assistant erreicht den verwendeten ESPHome-Sender.
 - **BLE-Truma-Verbindung**: Es besteht tatsächlich eine BLE-Verbindung zum Panel.
 - **Jetzt synchronisieren / Live-Modus starten**: sofort eine Aktualisierung anfordern.
-- **Live-Modus-Dauer 0 Minuten**: einmal synchronisieren, danach wieder freigeben. Nicht unendlich.
+- **Live-Modus-Dauer** 0 Minuten: einmal synchronisieren, danach wieder freigeben. Nicht unendlich.
 - **1–999 Minuten**: Verbindung für die eingestellte Dauer halten.
 - **Live-Modus beenden**: vorzeitig freigeben.
 
@@ -18,18 +21,23 @@ Funkabbrüche können die Verbindung unabhängig davon beenden.
 
 ## Energiequelle
 
-**Diesel**, **Elektro** oder **Hybrid** wählen. Elektro und Hybrid beginnen mit
-900 W. Anschließend kann die elektrische Heizleistung angepasst werden.
-Bei Diesel ist die elektrische Leistungswahl deaktiviert. Die Energiequelle
-allein schaltet die Raumheizung nicht ein: dazu die Betriebsart und die
-gewünschte Temperatur einstellen.
+In der Auswahl **Energiequelle** stehen **Diesel**, **Elektro** und
+**Hybrid**. Elektro und Hybrid beginnen mit 900 W; anschließend lässt sich
+die Auswahl **Elektrische Heizung** anpassen, bei Diesel ist sie
+deaktiviert. Die Energiequelle allein schaltet die Raumheizung nicht ein:
+dazu die Betriebsart und die gewünschte Temperatur einstellen.
 
 Diese kombinierte Auswahl gilt für Dieselheizungen mit elektrischem Heizelement.
-Bei **nur einer erkannten Energiequelle** sind Energiequellen-Auswahl und
-elektrische Leistungswahl beide deaktiviert. Ein-/Ausschalten erfolgt über die
-Raumheizung, nicht über eine zusätzliche Aus/Diesel-Auswahl. Bei Gas/Elektro
-bleibt die separate elektrische Leistungswahl einschließlich **Aus** erhalten,
-soweit das Panel dies anbietet; eine Gas-Umschaltung wird nicht vorgetäuscht.
+Bei **nur einer erkannten Energiequelle** sind beide Auswahlen deaktiviert.
+Ein-/Ausschalten erfolgt über die Raumheizung, nicht über eine zusätzliche
+Aus/Diesel-Auswahl. Bei Gas/Elektro bleibt **Elektrische Heizung**
+einschließlich **Aus** erhalten, soweit das Panel dies anbietet; eine
+Gas-Umschaltung wird nicht vorgetäuscht.
+
+Der einzelne Schalter **Dieselbrenner** besteht zusätzlich weiter. Er
+schaltet nur den Brenner und kann, anders als die Auswahl, auch alle
+Quellen abschalten — wer das nicht braucht, deaktiviert ihn in Home
+Assistant.
 
 Während der Transaktion erscheint **Wird umgestellt …**. Erst die Rückmeldung
 des Panels bestätigt den neuen Zustand. Ein temporärer Hybrid-Zustand während
@@ -89,27 +97,34 @@ Die mitgelieferten Karten werden beim Start der Integration registriert.
 
 # Truma iNet X – User guide
 
+> Upgrading from 0.7.3-live.x changes **every entity id**, with no
+> migration: [upgrading this fork](upgrading-fork.md).
+
 ## Connections and refresh
 
 **BLE transmitter connection** is the HA-to-ESPHome link; **BLE Truma connection**
 is the actual connection to the panel. **Sync now / start live mode** requests an
-immediate refresh. A live duration of **0 minutes means one sync, not infinity**;
-1–999 minutes keeps the connection for that duration. **End live mode** releases
+immediate refresh. A **Live mode duration** of **0 minutes means one sync,
+not infinity**; 1–999 minutes keeps the connection for that duration. **End live mode** releases
 it early. The separate integration option `poll_interval_seconds: 0` means
 permanently connected. Commands renew a minimum 60-second hold; radio failures
 can still interrupt it.
 
 ## Energy source and operation feedback
 
-Choose Diesel, Electric or Hybrid. Electric/Hybrid start at 900 W; adjust electric
-output afterwards. Electric output is disabled in Diesel mode. Choosing a source
-does not itself start room heating; select the heating mode and target separately.
+The **Energy source** select offers Diesel, Electric and Hybrid. Electric and
+Hybrid start at 900 W; adjust **Electric heating** afterwards, which is
+disabled in Diesel mode. Choosing a source does not itself start room
+heating; select the heating mode and target separately.
 
 The combined selector applies to diesel heaters with an electric element.
-With **only one detected source**, both source and electric-output controls are
-disabled. Use room-heating controls to turn heating on or off, not an extra
-Off/Diesel selector. Gas/Electric heaters retain standalone electric output,
-including **Off**, as supported by the panel; no gas-source switching is implied.
+With **only one detected source**, both selects are disabled. Use room-heating
+controls to turn heating on or off, not an extra Off/Diesel selector.
+Gas/Electric heaters keep **Electric heating** including **Off**, as supported
+by the panel; no gas-source switching is implied.
+
+The upstream **Diesel burner** switch stands beside the select. It drives the
+burner alone and, unlike the select, can also turn every source off.
 
 **Changing …** is displayed until the energy transaction finishes. Intermediate
 Hybrid readings from the two writes are not presented as a completed selection.

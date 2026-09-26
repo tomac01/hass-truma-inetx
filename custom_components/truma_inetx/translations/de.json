@@ -4,12 +4,12 @@
     "step": {
       "user": {
         "title": "Truma iNet X hinzufügen",
-        "description": "Wähle das Truma-Bedienteil aus.",
+        "description": "Wähle das Truma-Bedienteil aus, das hinzugefügt werden soll.",
         "data": {
           "address": "Gerät"
         },
         "data_description": {
-          "address": "Es werden nur Truma-Bedienteile angezeigt, die aktuell in Bluetooth-Reichweite von Home Assistant oder einem ESP32-Proxy senden."
+          "address": "Das Truma-Bedienteil, mit dem gekoppelt werden soll. Aufgeführt werden nur Bedienteile, die aktuell in Reichweite des Bluetooth von Home Assistant senden -- ob das ein ESP32-Proxy oder ein lokaler Adapter ist."
         }
       },
       "confirm": {
@@ -17,46 +17,98 @@
       },
       "pair": {
         "title": "Mit dem Truma-Bedienteil koppeln",
-        "description": "Versetze das Bedienteil {name} in den Modus zum Hinzufügen eines Geräts und wähle anschließend einmal **Absenden**."
+        "description": "Versetze das Bedienteil {name} in den Modus zum Hinzufügen eines Geräts (in der Truma-InetX-App oder am Bedienteil selbst) und wähle anschließend einmal **Absenden**. Das Koppeln kann bis zu einer Minute dauern.\n\n**Falls das Koppeln fehlschlägt, arbeite Folgendes der Reihe nach ab:**\n\n1. **Leere die gespeicherte Bluetooth-Geräteliste des Bedienteils.** Sie fasst nur etwa vier Geräte und lehnt neue Kopplungen danach stillschweigend ab. Versetze das Bedienteil wieder in den Modus zum Hinzufügen eines Geräts und versuche es erneut.\n2. **Hat das Leeren der Liste nicht geholfen, schalte das Bedienteil aus und wieder ein und beginne von vorn** -- ausschalten, einschalten, erneut in den Modus zum Hinzufügen eines Geräts versetzen und diesen Schritt wiederholen. Das Aus- und Einschalten beendet hängende Verbindungen, die einen Verbindungsplatz belegen, und lässt das Bedienteil eine frische Bluetooth-Adresse senden, die sich problemlos koppeln lässt. Damit lösen sich die meisten hartnäckigen Fälle.\n\nVersetze das Bedienteil vor jedem Versuch erneut in den Modus zum Hinzufügen eines Geräts: Es nimmt eine Kopplung nur an, während sein Kopplungsbildschirm angezeigt wird."
       }
     },
     "error": {
-      "pairing_failed": "Die Kopplung mit dem Bedienteil ist fehlgeschlagen. Versetze es erneut in den Kopplungsmodus und versuche es noch einmal."
+      "pairing_failed": "Die Kopplung mit dem Bedienteil ist fehlgeschlagen. Versetze es wieder in den Modus zum Hinzufügen eines Geräts und versuche es erneut. Schlägt das fehl, leere seine gespeicherte Bluetooth-Geräteliste (sie fasst nur etwa vier Geräte); hilft auch das nicht, schalte das Bedienteil aus und wieder ein, versetze es erneut in den Modus zum Hinzufügen eines Geräts und beginne von vorn."
     },
     "abort": {
-      "no_devices_found": "Kein Truma iNet X Bedienteil gefunden. Prüfe Stromversorgung und Bluetooth-Reichweite.",
+      "no_devices_found": "Kein Truma iNet X Bedienteil gefunden. Stelle sicher, dass das Bedienteil eingeschaltet und in Bluetooth-Reichweite ist.",
       "already_configured": "Dieses Truma-Bedienteil ist bereits eingerichtet.",
-      "awaiting_name": "Es wird darauf gewartet, dass das Truma-Bedienteil seinen Namen sendet.",
+      "awaiting_name": "Es wird darauf gewartet, dass das Truma-Bedienteil vor dem Koppeln seinen Namen sendet.",
       "reconfigure_successful": "Das Truma-Bedienteil wurde erfolgreich neu gekoppelt."
     }
   },
   "exceptions": {
     "control_not_ready": {
-      "message": "Die Truma-BLE-Steuerung ist noch nicht verfügbar."
+      "message": "Die Truma-BLE-Steuerung ist noch nicht verfügbar (der Transport wird in einer späteren Build-Stufe eingebunden)."
     }
   },
   "issues": {
-    "no_proxy_route": {
-      "title": "Das Truma-Bedienteil ist nicht erreichbar",
-      "description": "Home Assistant empfängt Bluetooth-Werbung des Bedienteils, kann aber keine Verbindung aufbauen. Verwende einen ESPHome-Bluetooth-Proxy in Reichweite des Bedienteils."
+    "no_route": {
+      "title": "Nichts kann das Truma-Bedienteil erreichen",
+      "description": "Home Assistant empfängt die Bluetooth-Werbung des Truma-Bedienteils, aber keiner der vorhandenen Bluetooth-Adapter und -Proxys kann eine Verbindung zu ihm aufbauen.\n\nDas Bedienteil verwendet eine rotierende private Bluetooth-Adresse und antwortet nur auf einen Verbindungsversuch, der seine *aktuelle* Adresse auf die Luft bringt. Ob das geschieht, hängt vom Host ab:\n\n- Ein Linux-Kernel vor 6.19 erledigt das in Software, ein einfacher lokaler Adapter funktioniert also.\n- Ab 6.19 sendet der Kernel stattdessen die Identitätsadresse des Bedienteils, auf die das Bedienteil nicht antwortet. Ein lokaler Adapter funktioniert dann nur, wenn sein Controller LL Privacy unterstützt und BlueZ den Schlüssel des Bedienteils in die Resolving List eingetragen hat, was es für diese Art der Kopplung derzeit nicht tut. Eine Kernel-Korrektur ist upstream eingereicht und noch nicht übernommen.\n- Der Controller eines ESPHome-Bluetooth-Proxys erledigt das selbst, auf jedem Host.\n\nPrüfe, dass das Bedienteil in Reichweite dessen ist, was davon vorhanden ist, und dass nicht schon etwas anderes eine Verbindung zu ihm hält. Beachte, dass eine Kopplung an dem Adapter hängt, mit dem sie hergestellt wurde: Ist der Adapter oder Proxy, der das Bedienteil gekoppelt hat, nicht mehr da, muss das Bedienteil erneut gekoppelt werden.\n\nHome Assistant wählt selbst, über welchen Adapter oder Proxy verbunden wird; diese Integration bindet das Bedienteil nicht an einen bestimmten."
     }
   },
   "entity": {
     "binary_sensor": {
-      "connection": { "name": "BLE-Truma-Verbindung" },
-      "proxy_connection": { "name": "BLE-Sender-Verbindung" },
-      "flame": { "name": "Flamme" },
-      "gas": { "name": "Gas" }
+      "connection": {
+        "name": "BLE-Truma-Verbindung"
+      },
+      "cooling_active": {
+        "name": "Kühlung"
+      },
+      "demo_mode": {
+        "name": "Demomodus"
+      },
+      "error": {
+        "name": "Störung"
+      },
+      "gas": {
+        "name": "Gas"
+      },
+      "heating_active": {
+        "name": "Heizung"
+      },
+      "line_power": {
+        "name": "Landstrom"
+      },
+      "needs_energy": {
+        "name": "Energieanforderung"
+      },
+      "proxy_connection": {
+        "name": "BLE-Sender-Verbindung"
+      }
     },
     "button": {
-      "manual_sync": { "name": "Jetzt synchronisieren / Live-Modus starten" },
-      "manual_stop": { "name": "Live-Modus beenden" }
+      "error_reset": {
+        "name": "Störung zurücksetzen"
+      },
+      "manual_stop": {
+        "name": "Live-Modus beenden"
+      },
+      "manual_sync": {
+        "name": "Jetzt synchronisieren / Live-Modus starten"
+      }
     },
     "number": {
-      "fan_level": { "name": "Lüfterstufe" },
-      "manual_live_minutes": { "name": "Live-Modus-Dauer" }
+      "fan_level": {
+        "name": "Lüfterstufe"
+      },
+      "manual_live_minutes": {
+        "name": "Live-Modus-Dauer"
+      },
+      "panel_brightness": {
+        "name": "Displayhelligkeit"
+      },
+      "panel_display_timeout": {
+        "name": "Display-Abschaltzeit"
+      },
+      "panel_night_brightness": {
+        "name": "Nachthelligkeit"
+      }
     },
     "select": {
+      "air_mode": {
+        "name": "Heizmodus"
+      },
+      "cooling_mode": {
+        "name": "Kühlstufe"
+      },
+      "electric_level": {
+        "name": "Elektrische Heizung"
+      },
       "energy_source": {
         "name": "Energiequelle",
         "state": {
@@ -66,10 +118,84 @@
           "changing": "Wird umgestellt …"
         }
       },
-      "electric_level": { "name": "Elektrische Heizleistung" },
-      "water_mode": { "name": "Warmwasser" }
+      "water_mode": {
+        "name": "Warmwasser"
+      }
     },
     "sensor": {
+      "battery_level": {
+        "name": "Sensorbatterie"
+      },
+      "ble_conn_state": {
+        "name": "Verbindungsstatus"
+      },
+      "ble_free_slots": {
+        "name": "Freie Plätze"
+      },
+      "ble_mgmt_state": {
+        "name": "Status"
+      },
+      "climate_state": {
+        "name": "Klimastatus (roh)"
+      },
+      "cooling_status": {
+        "name": "Kühlstatus",
+        "state": {
+          "off": "Aus",
+          "running": "Kühlt",
+          "idle": "Bereit"
+        }
+      },
+      "cooling_temp": {
+        "name": "Kühltemperatur"
+      },
+      "current_temp": {
+        "name": "Raumtemperatur"
+      },
+      "error_code": {
+        "name": "Störungscode"
+      },
+      "faster_water_heating_time": {
+        "name": "Schnellaufheizzeit"
+      },
+      "fault_reset_window": {
+        "name": "Reset-Zeitfenster"
+      },
+      "fresh_water_level": {
+        "name": "Frischwasser"
+      },
+      "gas_bottle_contents": {
+        "name": "Gasflascheninhalt"
+      },
+      "gas_bottle_level": {
+        "name": "Gasflaschenfüllstand"
+      },
+      "gas_bottle_rem_time": {
+        "name": "Gasflasche Restwert (roh)"
+      },
+      "gas_bottle_temp": {
+        "name": "Gasflaschentemperatur"
+      },
+      "grey_water_level": {
+        "name": "Grauwasser"
+      },
+      "heating_status": {
+        "name": "Heizstatus",
+        "state": {
+          "off": "Aus",
+          "running": "Heizt",
+          "idle": "Bereit"
+        }
+      },
+      "internal_temp": {
+        "name": "Innentemperatur"
+      },
+      "leisure_battery_voltage": {
+        "name": "Aufbaubatterie"
+      },
+      "logic_supply": {
+        "name": "Logikspannung"
+      },
       "operation": {
         "name": "Vorgang",
         "state": {
@@ -79,21 +205,56 @@
           "error": "Fehler"
         }
       },
-      "current_temp": { "name": "Raumtemperatur" },
-      "faster_water_heating_time": { "name": "Schnellaufheizzeit" },
-      "flame_status": { "name": "Flammenstatus" },
-      "fresh_water_level": { "name": "Frischwasser" },
-      "grey_water_level": { "name": "Grauwasser" },
-      "internal_temp": { "name": "Innentemperatur" },
-      "leisure_battery_voltage": { "name": "Aufbaubatterie" },
-      "starter_battery_voltage": { "name": "Starterbatterie" },
-      "voltage": { "name": "Versorgungsspannung" },
-      "water_temp": { "name": "Wassertemperatur" }
+      "panel_clock": {
+        "name": "Uhrzeit im Bedienteil"
+      },
+      "panel_idle": {
+        "name": "Zeit seit letzter Bedienung"
+      },
+      "power_mode": {
+        "name": "Energiemodus (roh)"
+      },
+      "starter_battery_voltage": {
+        "name": "Starterbatterie"
+      },
+      "temperature_source": {
+        "name": "Temperaturquelle (roh)"
+      },
+      "timer_schedule": {
+        "name": "Zeitplan Timer {slot}"
+      },
+      "timers_enabled": {
+        "name": "Aktive Timer"
+      },
+      "voltage": {
+        "name": "Versorgungsspannung"
+      },
+      "water_temp": {
+        "name": "Wassertemperatur"
+      }
     },
     "switch": {
-      "faster_water_heating": { "name": "Schnelles Wasseraufheizen" },
-      "water_boost": { "name": "Warmwasser-Boost" },
-      "water_pump": { "name": "Frischwasserpumpe" }
+      "diesel": {
+        "name": "Dieselbrenner"
+      },
+      "faster_water_heating": {
+        "name": "Schnelles Wasseraufheizen"
+      },
+      "panel_screensaver": {
+        "name": "Bildschirmschoner"
+      },
+      "timer": {
+        "name": "Timer {slot}"
+      },
+      "water_autofill": {
+        "name": "Nachfüllmodus"
+      },
+      "water_boost": {
+        "name": "Warmwasser-Boost"
+      },
+      "water_pump": {
+        "name": "Frischwasserpumpe"
+      }
     }
   },
   "options": {
@@ -104,7 +265,7 @@
           "poll_interval_seconds": "Abfrageintervall (Sekunden, 0 = verbunden bleiben)"
         },
         "data_description": {
-          "poll_interval_seconds": "0 hält die Verbindung dauerhaft offen. Ein Wert größer 0 verbindet sich regelmäßig, liest die Werte und gibt den Bluetooth-Verbindungsplatz anschließend wieder frei."
+          "poll_interval_seconds": "0 hält die Verbindung offen, Änderungen erscheinen also sofort. Ein Wert größer 0 verbindet sich, liest die Werte und trennt wieder -- langsamer, gibt aber zwischen den Messungen den Verbindungsplatz des Adapters frei, was zählt, wenn weitere Bluetooth-Geräte denselben Adapter nutzen."
         }
       }
     }

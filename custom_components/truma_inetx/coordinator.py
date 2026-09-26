@@ -1,60 +1,74 @@
 """Coordinator for the Truma iNet X (BLE) integration.
 
-Owns the shared :class:`TrumaState` and a background session that connects to
-the panel over HA's Bluetooth stack, runs the register/subscribe/identity/
-param-discovery startup, and feeds notifications into the state. Reconnects
-with backoff on drop.
+Owns the shared :class:`Bus` and a background session that connects to the
+panel over HA's Bluetooth stack, runs the register/subscribe/identity/
+param-discovery startup, and files every notification under the device that
+sent it. Reconnects with backoff on drop.
 """
 
 from __future__ import annotations
 
 import asyncio
 import uuid
-from contextlib import contextmanager
 
 from bleak_retry_connector import BleakClientWithServiceCache
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import issue_registry as ir
+from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
-from .ble import TrumaBleClient, device_from_bluez
+from . import session
+from .ble import TrumaBleClient, close_link, device_from_bluez
 from .bt import (
+    ADDR_IDENTITY,
+    address_kind,
     async_panel_advertising,
     async_remote_scanner_source,
-    async_resolve_proxy_device,
+    async_resolve_device,
     async_wait_until_heard,
 )
+from .bus import Bus
 from .const import (
     DOMAIN,
-    ISSUE_NO_PROXY_ROUTE,
+    ISSUE_NO_PROXY_ROUTE_LEGACY,
+    ISSUE_NO_ROUTE,
     LOGGER,
-    NO_PROXY_MISSES_BEFORE_WARNING,
+    MANUFACTURER,
+    MODEL,
+    NO_ROUTE_MISSES_BEFORE_WARNING,
 )
+from .operations import OperationRegistry
 from .proxy import TrumaProxyTracker
-from .truma.const import (
-    CTRL_MBP,
-    DEV_APP_DEFAULT,
-    DEV_BROADCAST,
-    DEV_MSG_BROKER,
-    DEVICE_SEED,
-    MBP_PARAM_DISC,
-    MEASURE_REQUEST_PARAM,
-    MEASURE_REQUEST_TOPICS,
-    TOPIC_BATCHES,
-)
-from .truma.protocol import (
-    build_identity_frames,
-    build_register_frame,
-    build_subscribe_frame,
-    build_v3_frame,
-    build_write_frame,
-)
-from .truma.state import TrumaState
+from .truma.const import CTRL_MBP, DEV_BLE_MGMT, DEV_PANEL, MBP_PARAM_DISC
+from .truma.protocol import build_v3_frame, build_write_frame
 
 type TrumaConfigEntry = ConfigEntry[TrumaCoordinator]
+
+# Names for bus addresses whose function is known but which publish no
+# Identify.Name of their own.
+#
+# Consulted only *after* the bus's own name, so nothing that names itself can
+# be mislabelled by this -- which is the whole reason it is safe, because
+# 0x06 is a class the gas-bottle sensors share and they do name themselves.
+# It is not a class-to-product mapping: those are unverifiable (a Dometic roof
+# air conditioner and a Schaudt electrical block share a class), whereas this
+# address is the panel's own Bluetooth side and is already named in
+# DEVICE_SEED for the same reason.
+_KNOWN_NAMES = {DEV_BLE_MGMT: "Bluetooth management"}
+
+# Whether this Home Assistant hangs a device off its hub by the hub's registry
+# id rather than by its identifiers.
+#
+# ``via_device`` is deprecated as of 2026.8 and stops working in 2027.8;
+# ``via_device_id`` replaced it. Asked of the type rather than of the version
+# number, because the question is exactly "does this DeviceInfo take that
+# key" -- and an older one does not merely ignore it, it rejects the device
+# info whole and leaves the vehicle with no devices at all.
+_VIA_DEVICE_ID = "via_device_id" in DeviceInfo.__annotations__
 
 # Reconnect backoff. Start quick (a healthy link that just dropped should come
 # back fast) and grow exponentially to a cap when the panel stays unreachable,
@@ -72,6 +86,15 @@ _RECONNECT_DELAY_MAX = 45  # seconds
 # noticed): drop it and reconnect rather than sit "connected" forever with
 # stale data. This is what recovers the session without a manual power-cycle.
 _DATA_STALL_TIMEOUT = 90  # seconds
+# ...and the same question for the startup that runs before that watchdog does.
+# Startup is the only part of a session with no deadline of its own: every step
+# in it waits on the panel, and the watchdog above only starts once all of them
+# have finished. Measured on the van, a healthy startup takes about 25 s from
+# the link coming up to parameter discovery finishing, so this is four times
+# the longest one seen and is not a latency budget -- it is the backstop for a
+# step that hangs in a way its own timeout does not cover, so that the session
+# ends and is retried instead of sitting "connected" and delivering nothing.
+_STARTUP_TIMEOUT = 120  # seconds
 
 # Poll mode: 0 keeps the link open (the default and what most people want --
 # state arrives the instant the panel changes it). A non-zero interval connects,
@@ -95,42 +118,59 @@ _POLL_MAX_DWELL = 40  # seconds
 # A write in poll mode has to wait for a whole connect plus startup handshake
 # (~20 s measured), so allow generously more than that before giving up.
 _WRITE_CONNECT_TIMEOUT = 75  # seconds
-_COMMAND_HOLD_SECONDS = 60
-_WRITE_FEEDBACK_TIMEOUT = 12
-_MANUAL_LIVE_MINUTES_MAX = 999
+# How long a stop waits for the session task to end before cancelling it. The
+# loop's own waits all watch the stop event, so this is only ever spent on a
+# task parked inside a connect attempt -- and it is spent by Home Assistant
+# unloading the config entry, which is why it is short rather than generous.
+_SESSION_EXIT_TIMEOUT = 5.0  # seconds
 _STORAGE_VERSION = 1
 
-# Parameter discovery is sent to each bus device separately (see DEVICE_SEED),
-# so the number of frames is a dozen or two rather than two. Nothing is waited
-# for in between -- the replies come back as ordinary notifications and are
-# handled by _on_frame whenever they land -- so the gap only exists to avoid
-# filling the transport queue faster than the panel drains it.
-_PARAM_DISC_GAP = 0.15  # seconds
-# ...but do wait once after each round, long enough for the replies to arrive,
-# because the addresses they carry are what the next round is built from.
-_PARAM_DISC_SETTLE = 3  # seconds
-
 # How often to ask the on-demand sensors for a fresh measurement while the
-# link is held open (see MEASURE_REQUEST_TOPICS for why asking is needed at
-# all). A minute is what the reporter's own build used, which is the only
+# link is held open (see session.request_measurements for why asking is needed
+# at all). A minute is what the reporter's own build used, which is the only
 # cadence anyone has run against the hardware; it is also about as often as a
 # tank level can meaningfully change, and it costs two frames.
 #
 # In poll mode this is not used: every poll re-runs startup, which asks once,
 # so the reading is as fresh as the poll it came with.
 _MEASURE_INTERVAL = 60  # seconds
-# Same reasoning as _PARAM_DISC_GAP -- do not hand the transport a second
-# frame before it has drained the first.
-_MEASURE_GAP = 0.15  # seconds
 
-# How long to wait for the panel to answer registration with an address.
-# Measured on the van: a healthy panel answers in about a second, so this is
-# already generous -- it exists to cover a busy panel, not a dead link.
-_REGISTER_TIMEOUT = 20  # seconds
+# Ein Schreibvorgang gilt erst als erfolgt, wenn das Gerät selbst den neuen
+# Wert meldet. Der Transport-ACK sagt nur, dass das Panel den Frame genommen
+# hat -- gemessen wurde ein quittierter Befehl, den die Heizung während des
+# Nachlüftens nicht ausführte.
+#
+# Zeit, die wir dem Gerät je Anlauf für seine Antwort geben. Ein aufwachender
+# Brenner meldet verzögert; zwölf Sekunden liegen über dem gemessenen Maximum
+# und noch unter der Geduld eines Bedieners vor dem Panel.
+_WRITE_FEEDBACK_TIMEOUT = 12  # seconds
+# Ein schlafendes Gerät antwortet oft erst beim zweiten Anlauf.
+_WRITE_ATTEMPTS = 3
+_WRITE_RETRY_PAUSE = 2  # seconds
+# Vor der Endprüfung einer Mehrfach-Transaktion, damit Folgemeldungen
+# ankommen, die das Gerät erst nach dem letzten Befehl schickt.
+_WRITE_SETTLE = 1  # seconds
+
+# WaterHeating.Active meldet 1 (heizt) oder 2 (ein, Solltemperatur erreicht).
+# Beides bestätigt "ein"; nur eine frische 0 bestätigt "aus". Die
+# Dreiwertigkeit ist die des Protokolls (siehe bus.ActiveState) -- neu ist
+# hier nur, sie als Bestätigung gelten zu lassen.
+_ENABLED_STATES = (1, 2)
+
+# Nach einem Befehl bleibt der Link mindestens so lange offen. Deutlich mehr
+# als _POLL_QUIET, weil nach einer Bedienung meist weitere folgen und die
+# Heizung ihre Folgeänderungen verzögert nachmeldet. Der Wert ist absolut,
+# nicht additiv: zehn schnelle Befehle ergeben nicht zehn Minuten.
+_COMMAND_HOLD_SECONDS = 60  # seconds
+
+# Obergrenze für ein angefordertes Live-Fenster. Nicht als Komfortgrenze
+# gedacht, sondern gegen den Vertipper: eine Dauer, die aus einem Skript
+# kommt, soll das Fahrzeug nicht tagelang an einem Verbindungsplatz halten.
+_MANUAL_LIVE_MINUTES_MAX = 999
 
 
-class TrumaCoordinator(DataUpdateCoordinator[TrumaState]):
-    """Hold Truma state and run the live BLE session."""
+class TrumaCoordinator(DataUpdateCoordinator[Bus]):
+    """Hold the panel's bus and run the live BLE session."""
 
     config_entry: TrumaConfigEntry
 
@@ -159,27 +199,64 @@ class TrumaCoordinator(DataUpdateCoordinator[TrumaState]):
         # Stable identity for entity/device unique IDs. The BLE address rotates
         # (resolvable private address), so it must NOT be used as identity.
         self.unique_id = entry.unique_id or address
-        self._state = TrumaState()
+        # The device registry's own id for the panel, filled in by setup once
+        # it has registered it (see __init__.py). None until then, and on any
+        # Home Assistant too old to want it.
+        self.hub_device_id: str | None = None
+        self._bus = Bus()
+        self._proxy_tracker = TrumaProxyTracker(self._async_proxy_changed)
+        entry.async_on_unload(self._proxy_tracker.async_setup())
+        self._operations = OperationRegistry(self._async_operations_changed)
+        # Der tatsächliche BLE-Sitzungszustand. ``bus.connected`` bleibt im
+        # Poll-Betrieb zwischen den Polls bewusst true, damit gecachte
+        # Bedienelemente verfügbar bleiben; dieses Flag ist das, was der
+        # Panel-Link-Sensor stattdessen meldet.
+        self._panel_link_connected = False
         self._client: TrumaBleClient | None = None
+        self._session_task: asyncio.Task[None] | None = None
         self._identity: dict | None = None
         # Loop-clock timestamp of the last frame received; drives the stall
         # watchdog in the hold loop. Set on connect, refreshed on every frame.
         self._last_frame: float = 0.0
         # RPA addresses that failed to establish a connection, so the resolver
         # rotates to another advertised address instead of hammering a dead one
-        # (see the phantom-RPA explanation in bt.async_resolve_proxy_device).
+        # (see the phantom-RPA explanation in bt.async_resolve_device).
         # Cleared on a successful connection and when it would block every
         # candidate, so a transiently-bad address gets retried later.
         self._avoid: set[str] = set()
         # Address of the most recent connection attempt, so _run knows which
         # one to blame if the attempt fails.
         self._last_addr: str | None = None
-        # Consecutive resolves that found the panel advertising but no proxy
-        # able to reach it. Debounces the repair issue (see _async_note_...).
-        self._no_proxy_misses = 0
-        self._proxy_tracker = TrumaProxyTracker(self._async_proxy_changed)
-        entry.async_on_unload(self._proxy_tracker.async_setup())
+        # Which kind of address (identity vs rotating RPA) the panel last
+        # answered on, persisted with the identity. Hosts differ in which one
+        # works -- it depends on their kernel and controller, not on anything
+        # we can see -- so let the host prove its own answer once instead of
+        # walking the addresses that never work on every single connect
+        # (issue #13). ``None`` until a session has proved something.
+        self._address_kind: str | None = None
+        # The kind the current attempt is dialling, and whether the memory
+        # above just failed us (in which case the next attempt tries the other
+        # kind -- see _prefer_identity).
+        self._last_kind: str | None = None
+        self._kind_stale = False
+        # Which transport carried the last session that came up ("proxy" or
+        # "local"), for diagnostics only. Not persisted and never dialled on:
+        # HA re-scores the paths at every connect, so last session's transport
+        # predicts nothing about the next one (issue #13).
+        self._session_transport: str | None = None
+        # Whether the current attempt ever reached "connected and subscribed".
+        # A link that dropped after hours of good service says nothing about
+        # which address kind is right, so only failures before that flip the
+        # memory.
+        self._session_ok = False
+        # Consecutive resolves that found the panel advertising with nothing
+        # able to connect to it. Debounces the repair issue (see
+        # _async_note_no_route).
+        self._no_route_misses = 0
         self._store: Store = Store(hass, _STORAGE_VERSION, f"{DOMAIN}_{entry.entry_id}")
+        # Everything the store holds: the app identity plus our own
+        # bookkeeping. Kept whole so a save never drops a key it did not know.
+        self._stored: dict = {}
         self._stop = False
         # Set on stop to interrupt the reconnect wait immediately (so unload is
         # not blocked for up to the full backoff delay).
@@ -188,233 +265,429 @@ class TrumaCoordinator(DataUpdateCoordinator[TrumaState]):
         # nudges the loop awake and holds the link open until it has been sent.
         self._wake_event = asyncio.Event()
         self._connected_event = asyncio.Event()
-        # Published only after registration, identity and device discovery.
-        self._write_ready_event = asyncio.Event()
         self._writes_pending = 0
+        # Ein Rückmeldungsbuch je laufendem Schreibvorgang, unter dessen
+        # Vorgangs-Token: Token -> {(addr, topic, param): Wert}. Eines je
+        # Vorgang und nicht eines für alle, weil Home Assistant Service-Aufrufe
+        # nicht serialisiert -- eine Szene, ein `parallel:`-Skript oder schlicht
+        # eine zweite Bedienung innerhalb der bis zu 40 s, die ein Befehl
+        # braucht, lässt zwei Vorgänge gleichzeitig warten. Mit einem
+        # gemeinsamen Buch löschte der zweite dem ersten seine Meldungen weg,
+        # und ein ausgeführter Befehl würde als "did not confirm" gemeldet.
+        # Unter dem Token und nicht in einer Liste, weil zwei noch leere Bücher
+        # gleich sind und ``list.remove`` dann das falsche träfe.
+        # Leer heißt: es wird gerade nicht geschrieben, und der Frame-Pfad
+        # spart sich die Buchführung.
+        self._write_feedback: dict[int, dict[tuple[int, str, str], int]] = {}
+        # Loop-Zeitpunkt, bis zu dem nach einem Befehl nicht aufgelegt wird.
         self._command_hold_until = 0.0
-        self._command_lock = asyncio.Lock()
-        self._write_feedback: dict[tuple[int, str, str], int] | None = None
-        # Actual BLE session state. TrumaState.connected deliberately remains
-        # true between polls so cached controls stay available; this flag is
-        # what the user-facing BLE-Truma-Verbindung sensor reports instead.
-        self._panel_link_connected = False
-        # A dashboard request can wake poll mode without faking a parameter
-        # write.  The requested hold starts only after startup has completed,
-        # so a slow BLE handshake never consumes the user's live-mode time.
+        # Dasselbe für ein angefordertes Live-Fenster.
+        self._manual_hold_until = 0.0
+        # Eine Anfrage aus dem Dashboard kann den Poll-Betrieb wecken, ohne
+        # einen Parameter-Write vorzutäuschen. Die gewünschte Haltezeit
+        # beginnt erst nach dem Handshake, damit ein langsamer BLE-Aufbau die
+        # Live-Zeit des Nutzers nicht verbraucht.
         self._manual_wake_pending = False
         self._manual_hold_request_minutes: int | None = None
-        self._manual_hold_until = 0.0
+        # Einweg-Wunsch "bitte auflegen". Die Verweilschleife liest ihn erst
+        # *nach* den Writes, damit ein laufender Befehl nicht abgeschnitten
+        # wird.
         self._manual_release_requested = False
-        self.manual_live_minutes = 0
-        self._operations: dict[int, tuple[str, str, object]] = {}
-        self._operation_serial = 0
-        self._operation_result_serial = 0
-        self._command_result_serial = 0
-        self._operation_result = ("idle", None, None, None)
-        self._data_revision = 0
+        # token -> Event. Solange nicht leer, besitzt ein manueller
+        # Lesevorgang die Sitzung; das Event ist sein Abbruchkanal.
         self._manual_requests: dict[int, asyncio.Event] = {}
+        # Das Token der jüngsten manuellen Anfrage. Ein spät scheiternder
+        # Vorgang erkennt daran, dass er nicht mehr der Besitzer des Fensters
+        # ist, und räumt dann nichts weg.
+        self._manual_operation: int | None = None
+        # Von der Number-Entität gesetzt, vom Sync-Button gelesen (Task 10).
+        self.manual_live_minutes = 0
+
+    def _hold_after_command(self) -> None:
+        """Den Link nach einem Befehl offen halten.
+
+        Absolut, nicht additiv: jeder Befehl setzt dasselbe Fenster neu ab
+        *jetzt*. Zehn schnelle Befehle ergeben also eine Minute Nachlauf, nicht
+        zehn -- aufaddiert hinge das Wohnmobil nach einer Bedienfolge minutenlang
+        am Panel, obwohl längst niemand mehr etwas erwartet.
+        """
+        self._command_hold_until = self.hass.loop.time() + _COMMAND_HOLD_SECONDS
 
     @property
-    def operation_state(self) -> str:
-        """Report commands and their errors ahead of background sync."""
-        return self._foreground_operation()[0]
+    def manual_session_active(self) -> bool:
+        """Ob ein angefordertes Live-Fenster noch läuft.
 
-    @property
-    def operation_attributes(self) -> dict:
-        """Stable frontend action, target and error contract."""
-        _, action, target, error = self._foreground_operation()
-        return {"action": action, "target": target, "error": error}
+        Nur im Poll-Betrieb eine sinnvolle Frage: ein Dauerlink ist ohnehin
+        immer live.
+        """
+        return (
+            bool(self.poll_interval)
+            and self.hass.loop.time() < self._manual_hold_until
+        )
 
-    def _foreground_operation(self) -> tuple:
-        for op in self._operations.values():
-            if op[0] == "changing":
-                return (*op, None)
+    async def async_request_manual_session(self, minutes: int) -> None:
+        """Jetzt synchronisieren und den Poll-Betrieb optional offen halten.
+
+        ``minutes`` ist die Zeit, die der Link *nach* der Synchronisation noch
+        offen bleiben soll. 0 heißt genau einmal lesen -- nicht unendlich.
+        """
         if (
-            self._operation_result[0] == "error"
-            and self._operation_result[1] != "sync"
+            isinstance(minutes, bool)
+            or not isinstance(minutes, int)
+            or not 0 <= minutes <= _MANUAL_LIVE_MINUTES_MAX
         ):
-            return self._operation_result
-        if self._operations:
-            return (*next(iter(self._operations.values())), None)
-        return self._operation_result
+            raise HomeAssistantError(
+                f"Live mode duration must be a whole number from 0 to "
+                f"{_MANUAL_LIVE_MINUTES_MAX} minutes"
+            )
 
-    @property
-    def energy_source_changing(self) -> bool:
-        """Include queued source transactions, even behind another command."""
-        return any(op[1] == "energy_source" for op in self._operations.values())
+        with self._operations.operation("sync") as token:
+            self._manual_operation = token
+            cancelled = asyncio.Event()
+            self._manual_requests[token] = cancelled
+            try:
+                await self._request_manual_session(minutes, cancelled)
+                if cancelled.is_set():
+                    raise HomeAssistantError("Manual refresh cancelled")
+            except (Exception, asyncio.CancelledError):
+                # Ein Refresh bei stehender Verbindung setzt sein Fenster vor
+                # dem Lesen. Ein Fehlschlag muss es freigeben -- darf aber eine
+                # neuere Anfrage nicht rückgängig machen.
+                if self._manual_operation == token:
+                    self._manual_hold_until = 0.0
+                raise
+            finally:
+                self._manual_requests.pop(token, None)
+                if self._manual_operation == token:
+                    self._manual_hold_request_minutes = None
+                    self._manual_wake_pending = False
 
-    def _begin_operation(self, action: str, target=None) -> int:
-        self._operation_serial = getattr(self, "_operation_serial", 0) + 1
-        token = self._operation_serial
-        self._operations[token] = (
-            "syncing" if action == "sync" else "changing", action, target
-        )
-        self.async_set_updated_data(self._state)
-        return token
-
-    def _end_operation(self, token: int, error: str | None = None) -> None:
-        op = self._operations.pop(token, None)
-        if op is None:
+    async def _request_manual_session(
+        self, minutes: int, cancelled: asyncio.Event
+    ) -> None:
+        """Den Refresh unter dem Besitzer seines Vorgangs ausführen."""
+        client = self._client
+        if client is not None and client.connected and self._connected_event.is_set():
+            self._manual_release_requested = False
+            self._manual_hold_until = (
+                self.hass.loop.time() + minutes * 60
+                if self.poll_interval and minutes
+                else 0.0
+            )
+            # Der Startup hat die gewöhnlichen Parameter eben aufgefrischt.
+            # Bei bereits offener Verbindung auch die Sensoren fragen, die nur
+            # auf Anfrage messen.
+            before = self._bus.last_update
+            await self._discover_params(client)
+            await self._request_measurements(client)
+            if self._bus.last_update == before:
+                raise HomeAssistantError(
+                    "Truma refresh received no fresh panel parameters"
+                )
             return
-        # A reconnect can begin after the command that woke it. Completing
-        # that background read must not erase the failed user command.
-        preserves_command_error = (
-            op[1] == "sync"
-            and self._operation_result[0] == "error"
-            and self._operation_result[1] != "sync"
+
+        # Keine Verbindung: die Schleife wecken und die Dauer aufheben, bis
+        # der Handshake steht (siehe _finish_startup).
+        self._manual_hold_request_minutes = minutes
+        self._manual_wake_pending = True
+        self._manual_release_requested = False
+        self._connected_event.clear()
+        self._wake_event.set()
+        LOGGER.debug(
+            "Truma %s: manual session requested (%d minute live hold)",
+            self.unique_id,
+            minutes,
         )
-        if op[0] == "changing":
-            # Sync may have a newer token than the command that woke it.
-            # Only another command result can supersede this command result.
-            publish = token >= self._command_result_serial
-            if publish:
-                self._command_result_serial = token
-        else:
-            publish = (
-                token >= getattr(self, "_operation_result_serial", 0)
-                and not preserves_command_error
-            )
-        if publish:
-            self._operation_result_serial = max(
-                token, getattr(self, "_operation_result_serial", 0)
-            )
-            self._operation_result = (
-                ("error", op[1], op[2], error)
-                if error else ("idle", None, None, None)
-            )
-        self.async_set_updated_data(self._state)
-
-    @contextmanager
-    def _operation(self, action: str, target=None):
-        """Own precisely one lifecycle; cancellation must also terminate it."""
-        token = self._begin_operation(action, target)
+        connected = asyncio.ensure_future(self._connected_event.wait())
+        stopped = asyncio.ensure_future(cancelled.wait())
         try:
-            yield token
-        except asyncio.CancelledError:
-            self._end_operation(token, "Operation cancelled")
-            raise
-        except Exception as exc:
-            self._end_operation(token, str(exc) or type(exc).__name__)
-            raise
-        else:
-            self._end_operation(token)
+            done, _ = await asyncio.wait(
+                {connected, stopped},
+                timeout=_WRITE_CONNECT_TIMEOUT,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if stopped in done:
+                raise HomeAssistantError("Manual refresh cancelled")
+            if connected not in done:
+                raise HomeAssistantError(
+                    "Truma panel did not answer in time for the manual refresh"
+                )
+        finally:
+            connected.cancel()
+            stopped.cancel()
+            await asyncio.gather(connected, stopped, return_exceptions=True)
 
-    @staticmethod
-    def _command_operation(commands: list[tuple[str, str, int]]) -> tuple:
-        topic, param, value = commands[-1]
-        action = {
-            ("RoomClimate", "Mode"): "hvac_mode",
-            ("AirHeating", "TgtTemp"): "temperature",
-            ("AirCirculation", "FanLevel"): "fan_level",
-            ("EnergySrc", "ElectricLevel"): "electric_heating",
-            ("WaterHeating", "Active"): "water_mode",
-            ("WaterHeating", "Mode"): "water_mode",
-            ("WaterHeating", "FasterHeatingMode"): "water_priority",
-        }.get((topic, param), f"{topic}.{param}")
-        if action == "hvac_mode":
-            value = {0: "off", 1: "auto", 2: "cool", 3: "heat", 4: "heat", 5: "fan_only", 6: "dry"}.get(value, value)
-        return action, value
+    async def async_end_manual_session(self) -> None:
+        """Ein Live-Fenster freigeben, ohne einen laufenden Befehl abzuschneiden."""
+        # Nur freigeben, was es auch gibt: der Wunsch gilt genau einem
+        # laufenden Fenster. Der Knopf ist absichtlich immer bedienbar (er
+        # darf nicht verschwinden, wenn BLE unten ist), wird also auch im
+        # gewöhnlichen Poll-Betrieb gedrückt, wo der Link zwischen zwei
+        # Abfragen liegt. Bliebe der Wunsch dort stehen, schnitte er den
+        # *nächsten* Poll nach einer Sekunde ab -- gemessen 1 s statt 40 s
+        # bei durchredendem Panel, und der brächte nur noch die
+        # Startup-Werte. Eine wartende Anfrage braucht den Wunsch nicht: sie
+        # wird über ihr Event abgebrochen, und die gelöschte
+        # ``_manual_hold_request_minutes`` lässt den Startup gar kein Fenster
+        # erst antreten.
+        releasing = self.manual_session_active
+        self._manual_hold_request_minutes = None
+        self._manual_wake_pending = False
+        self._manual_hold_until = 0.0
+        if releasing:
+            self._manual_release_requested = True
+        for cancelled in self._manual_requests.values():
+            cancelled.set()
+        if not self._writes_pending:
+            self._wake_event.clear()
+        # Die Poll-Verweilschleife prüft das einmal pro Sekunde, und zwar nach
+        # den Writes -- sie legt daher nie unter einem laufenden Befehl auf.
+        LOGGER.debug("Truma %s: manual live mode released", self.unique_id)
 
-    async def _async_update_data(self) -> TrumaState:
-        """Return the current shared state (updated by BLE notifications)."""
-        return self._state
+    def _reconnect_delay(self, connected: bool, current: float) -> float:
+        """Die Wartezeit vor der nächsten Sitzung.
+
+        Ein Live-Modus-Fenster und ein Befehls-Nachlauf überleben einen
+        unerwarteten BLE-Abriss: solange eines von beiden läuft, wird schnell
+        neu verbunden statt im Poll-Takt oder mit gewachsenem Backoff.
+
+        ``current`` ist der gewachsene Backoff des Aufrufers; er gilt nur für
+        einen Versuch, der gar nicht erst zustande kam.
+        """
+        if (
+            self.manual_session_active
+            or self.hass.loop.time() < self._command_hold_until
+        ):
+            return _RECONNECT_DELAY_BASE
+        if connected and self.poll_interval:
+            # A completed poll is not a failure to back off from; the next one
+            # is simply due later.
+            return self.poll_interval
+        if connected:
+            return _RECONNECT_DELAY_BASE
+        return current
+
+    async def _async_update_data(self) -> Bus:
+        """Return the shared bus (updated by BLE notifications)."""
+        return self._bus
 
     @property
     def proxy_available(self) -> bool | None:
-        """Whether the ESPHome proxy used for this panel is registered."""
+        """Ob der für dieses Panel benutzte ESPHome-Proxy registriert ist."""
         return self._proxy_tracker.available
 
     @property
     def panel_link_connected(self) -> bool:
-        """Whether a physical BLE session to the Truma panel is open now."""
+        """Ob gerade eine physische BLE-Sitzung zum Panel offen ist."""
         return self._panel_link_connected
 
     @callback
     def _set_panel_link_connected(self, connected: bool) -> None:
-        """Publish an actual panel-link transition for entities and Logbook."""
+        """Einen echten Link-Wechsel an Entitäten und Logbuch veröffentlichen."""
         if self._panel_link_connected == connected:
             return
         self._panel_link_connected = connected
-        self.async_set_updated_data(self._state)
+        self.async_set_updated_data(self._bus)
 
     @callback
     def _async_proxy_changed(self) -> None:
-        """Publish a changed proxy registration state to entities."""
-        self.async_set_updated_data(self._state)
+        """Geänderte Proxy-Registrierung an die Entitäten geben."""
+        self.async_set_updated_data(self._bus)
+
+    @callback
+    def _async_operations_changed(self) -> None:
+        """Einen Vorgangswechsel an die Entitäten geben."""
+        self.async_set_updated_data(self._bus)
+
+    @property
+    def operation_state(self) -> str:
+        """Der Zustand für den Vorgangs-Sensor."""
+        return self._operations.state
+
+    @property
+    def operation_attributes(self) -> dict:
+        """Die Attribute für den Vorgangs-Sensor."""
+        return self._operations.attributes
+
+    @property
+    def energy_source_changing(self) -> bool:
+        """Ob eine Energiequellen-Transaktion läuft oder wartet."""
+        return self._operations.changing("energy_source")
 
     @callback
     def _remember_proxy_for_address(self, address: str) -> None:
-        """Remember the remote scanner that supplied this panel route."""
+        """Den entfernten Scanner merken, der diese Panel-Route geliefert hat."""
         if source := async_remote_scanner_source(self.hass, address):
             self._proxy_tracker.remember_source(source)
 
-    def _async_note_no_proxy_route(self) -> None:
-        """Warn the user when the panel is audible but unreachable.
+    def _async_note_no_route(self) -> None:
+        """Warn the user when the panel is audible but nothing can connect.
 
-        The panel uses a rotating private address, so reconnecting needs the
-        peer's current address to be put on air. A Bluetooth proxy's controller
-        resolves that itself; a local adapter can only do it if its controller
-        supports LL Privacy (most USB dongles and the Raspberry Pi's built-in
-        adapter do not -- check with `btmon` for "Resolving List" support) or
-        the host kernel compensates. Such a setup pairs once and then never
-        reconnects, which looks like a broken integration rather than missing
-        hardware. Say so instead of failing silently.
+        The panel uses a rotating private address, and it only answers a
+        connect that puts its current address on air. Whether a given adapter
+        does that is a property of the host: a controller with LL Privacy and
+        the panel's key in its resolving list does it, a kernel below 6.19 does
+        it in software, an ESPHome proxy's controller does it. A host where
+        none of them applies pairs once and then never reconnects, which looks
+        like a broken integration rather than a Bluetooth setup that cannot
+        serve this panel. Say so instead of failing silently.
+
+        What to *do* about it is deliberately not prescribed here beyond the
+        facts: this integration does not choose the adapter -- Home Assistant
+        scores every path it has and picks -- so it is in no position to say
+        which piece of the user's setup is the wrong one.
         """
         if not async_panel_advertising(self.hass, self.unique_id):
             # We cannot hear the panel at all -- off, asleep or out of range.
-            # Telling this user to buy a proxy would be wrong, so stay quiet
+            # That is a different fault with different advice, so stay quiet
             # and do not let it count towards the warning either.
             return
-        self._no_proxy_misses += 1
-        if self._no_proxy_misses != NO_PROXY_MISSES_BEFORE_WARNING:
+        self._no_route_misses += 1
+        if self._no_route_misses != NO_ROUTE_MISSES_BEFORE_WARNING:
             # Fires exactly once on the way up, so repeated failures do not
             # re-create the issue and re-notify every reconnect attempt.
             return
         LOGGER.warning(
-            "Truma %s is advertising but no route can reach it; a Bluetooth "
-            "proxy resolves the panel's rotating address for you, whereas a "
-            "local adapter needs controller or kernel support for it",
+            "Truma %s is advertising but nothing Home Assistant can reach it "
+            "with is able to connect",
             self.unique_id,
         )
         ir.async_create_issue(
             self.hass,
             DOMAIN,
-            ISSUE_NO_PROXY_ROUTE,
+            ISSUE_NO_ROUTE,
             is_fixable=False,
             severity=ir.IssueSeverity.WARNING,
-            translation_key=ISSUE_NO_PROXY_ROUTE,
-            learn_more_url="https://esphome.io/components/bluetooth_proxy.html",
+            translation_key=ISSUE_NO_ROUTE,
+            learn_more_url=(
+                "https://github.com/rpodgorny/hass-truma-inetx"
+                "#reaching-the-panel"
+            ),
         )
 
-    def _async_clear_no_proxy_route(self) -> None:
+    def _async_clear_no_route(self) -> None:
         """Reset the miss counter and drop the issue if it was raised."""
-        self._no_proxy_misses = 0
-        ir.async_delete_issue(self.hass, DOMAIN, ISSUE_NO_PROXY_ROUTE)
+        self._no_route_misses = 0
+        ir.async_delete_issue(self.hass, DOMAIN, ISSUE_NO_ROUTE)
+        # An issue this integration raised under the old id would otherwise
+        # outlive the rename, showing the user a card with no text behind it.
+        ir.async_delete_issue(self.hass, DOMAIN, ISSUE_NO_PROXY_ROUTE_LEGACY)
 
     async def async_start(self) -> None:
         """Load identity and launch the background BLE session."""
-        self._identity = await self._load_identity()
-        self.config_entry.async_create_background_task(
+        await self._load_stored_state()
+        # Kept so async_stop can end the session itself. Home Assistant
+        # cancels an entry's background tasks on unload, but only *after*
+        # async_unload_entry has returned -- which is too late to be the thing
+        # that closes our link (see async_stop).
+        self._session_task = self.config_entry.async_create_background_task(
             self.hass, self._run(), name=f"{DOMAIN} session {self.address}"
         )
 
     async def async_stop(self) -> None:
-        """Stop the session and disconnect."""
+        """Stop the session and close every link this coordinator holds.
+
+        The order is the fix for an entry that reloads into nothing. A task
+        cancelled mid-flight cannot run its own teardown -- the first ``await``
+        in its ``finally`` raises ``CancelledError`` straight away -- so
+        anything it still held is left connected, feeding a coordinator that
+        has stopped and holding one of the panel's ~4 connection slots. Home
+        Assistant cancels the entry's background tasks itself, right after
+        async_unload_entry returns, so unless the task is ended *here* that
+        cancellation is what ends it, at the one moment we can no longer close
+        what it was holding.
+
+        So: stop the task and wait for it, and only then disconnect. Every
+        await below is bounded, because this is awaited by the unload itself
+        and a hang here is an entry that never comes back.
+        """
         self._stop = True
         self._stop_event.set()
+        await self._stop_session_task()
         await self._disconnect_client()
+        await self._release_initial_client()
+
+    async def _stop_session_task(self) -> None:
+        """End the background session, cancelling it if it will not end.
+
+        ``_stop`` and the stop event are already set, and every wait in the
+        session loop watches one of them, so the ordinary path here is a few
+        milliseconds. What needs the bound is a task parked inside a connect
+        attempt: bleak's establish_connection can sit for tens of seconds, and
+        the unload is waiting on this.
+        """
+        task = self._session_task
+        self._session_task = None
+        if task is None or task.done():
+            return
+        try:
+            await asyncio.wait_for(task, _SESSION_EXIT_TIMEOUT)
+        except TimeoutError:
+            # wait_for has cancelled it and waited for the cancellation to
+            # land. Say so: a link the task was still establishing is one
+            # nothing can close afterwards, and this line is the only way to
+            # tell that case apart later.
+            LOGGER.warning(
+                "Truma %s: the session did not stop within %ss and was "
+                "cancelled; a link it was still opening may stay up until the "
+                "panel drops it",
+                self.unique_id,
+                _SESSION_EXIT_TIMEOUT,
+            )
+        except asyncio.CancelledError:
+            if not task.cancelled():
+                # Not the session's cancellation but our own: something is
+                # cancelling the unload that called this. Swallowing it would
+                # hide that from Home Assistant, which is worse than the links
+                # this leaves behind -- and the panel drops those in its own
+                # time.
+                raise
+            LOGGER.debug("Truma %s: session task was already cancelled", self.unique_id)
+        except Exception as exc:  # noqa: BLE001 - teardown must not raise
+            LOGGER.debug("Truma %s session task ended: %s", self.unique_id, exc)
+
+    async def _release_initial_client(self) -> None:
+        """Close a handed-off pairing link that no session ever adopted.
+
+        The config flow hands its live, encrypted connection to setup instead
+        of letting the session reconnect, because reconnecting is what wedges
+        the just-bonded RPA. Between setup and the first connect attempt this
+        coordinator is the only thing holding that link, and an entry reloaded
+        in that window -- enabling or disabling one entity is enough, Home
+        Assistant reloads on that by itself -- used to drop the reference with
+        the link still up.
+        """
+        client = self._initial_client
+        self._initial_client = None
+        if client is None:
+            return
+        LOGGER.debug(
+            "Truma %s: closing the handed-off pairing link, never adopted",
+            self.unique_id,
+        )
+        await close_link(client, self.unique_id)
 
     async def _disconnect_client(self) -> None:
         """Disconnect and drop the current BLE client, best effort.
 
-        Frees the proxy connection slot so the next attempt starts clean.
+        Frees the connection slot on whichever adapter or proxy carried it,
+        so the next attempt starts clean.
+
+        ``_connected_event`` fällt in derselben Anweisungsfolge wie der
+        Client, und zwar **vor** dem ``await`` auf ``disconnect()``. Das Event
+        heißt „es gibt eine Sitzung, durch die geschrieben werden kann"; wer
+        es länger stehen lässt als den Client, belügt jeden, der darauf
+        wartet. Genau das war das Fenster: Der Abbau kann Sekunden dauern,
+        und ein Befehl darin wartete auf ein bereits gesetztes Event, kehrte
+        sofort zurück, fand denselben fehlenden Client und wurde mit „not
+        connected" abgewiesen -- statt auf den nächsten Poll zu warten.
         """
         client = self._client
         self._client = None
-        self._write_ready_event.clear()
+        self._connected_event.clear()
         if client is None:
-            self._set_panel_link_connected(False)
             LOGGER.debug("Truma %s: no live BLE link to close", self.unique_id)
+            self._set_panel_link_connected(False)
             return
         try:
             await client.disconnect()
@@ -422,10 +695,17 @@ class TrumaCoordinator(DataUpdateCoordinator[TrumaState]):
         except Exception as exc:  # noqa: BLE001 - teardown must not raise
             LOGGER.debug("Truma %s disconnect: %s", self.unique_id, exc)
         finally:
+            # Auch ein gescheiterter Disconnect lässt keinen Link zurück,
+            # den wir noch melden dürften.
             self._set_panel_link_connected(False)
 
-    async def _load_identity(self) -> dict:
-        """Load the persisted app identity, or create and store a new one."""
+    async def _load_stored_state(self) -> None:
+        """Load the persisted app identity and address-kind memory.
+
+        The identity is created and stored on first run; the memory is written
+        only once a session has proved one (see _remember_address_kind), so it
+        is absent on a fresh install and the resolver keeps its default order.
+        """
         data = await self._store.async_load()
         if not data:
             data = {
@@ -434,44 +714,72 @@ class TrumaCoordinator(DataUpdateCoordinator[TrumaState]):
                 "username": "Home Assistant",
             }
             await self._store.async_save(data)
-        return data
+        self._stored = data
+        # Hand the protocol only what it writes to the panel: the stored blob
+        # also carries our own bookkeeping, which is none of its business.
+        self._identity = {
+            key: data[key] for key in ("muid", "uuid", "username") if key in data
+        }
+        self._address_kind = data.get("address_kind")
+
+    def _prefer_identity(self) -> bool:
+        """Whether to dial the identity address before the RPAs.
+
+        With no memory, keep the old order (RPAs first). With one, follow it --
+        unless it just failed, in which case try the other kind next. That
+        alternation is what makes a wrong memory cost one attempt rather than
+        the connection: a host that loses the route it learned (a kernel
+        upgrade taking the local adapter away, a proxy that moved) finds the
+        other one by itself instead of looking like broken hardware.
+        """
+        if self._address_kind is None:
+            return False
+        prefer = self._address_kind == ADDR_IDENTITY
+        return not prefer if self._kind_stale else prefer
+
+    async def _remember_address_kind(self, kind: str) -> None:
+        """Persist the kind of address that just carried a session.
+
+        Persisted rather than kept in memory because the cost this avoids is
+        paid at startup: the reporter in issue #13 measured 11.5 minutes from
+        HA start to a live session, against 1.2 minutes when the working
+        address was dialled first.
+        """
+        self._kind_stale = False
+        if kind == self._address_kind:
+            return
+        LOGGER.debug(
+            "Truma %s: connects on the %s address; remembering it",
+            self.unique_id,
+            kind,
+        )
+        self._address_kind = kind
+        self._stored["address_kind"] = kind
+        await self._store.async_save(self._stored)
 
     async def _run(self) -> None:
         """Maintain the BLE session, reconnecting with exponential backoff."""
         delay = _RECONNECT_DELAY_BASE
         while not self._stop:
-            connected = False
-            # Consume only the wake nudge.  The requested duration remains
-            # pending until startup succeeds, but a failed dial must still
-            # respect reconnect backoff instead of spinning without delay.
+            # Nur den Weck-Impuls verbrauchen. Die gewünschte Dauer bleibt
+            # offen, bis der Startup gelungen ist -- ein gescheiterter Anwahl-
+            # versuch muss aber trotzdem den Backoff respektieren, statt ohne
+            # Pause durchzudrehen.
             self._manual_wake_pending = False
-            self._sync_operation = self._begin_operation("sync")
+            connected = False
             try:
                 connected = await self._connect_and_run()
-            except asyncio.CancelledError:
-                self._end_operation(self._sync_operation, "Synchronization cancelled")
-                raise
             except Exception as exc:  # noqa: BLE001
-                self._end_operation(self._sync_operation, str(exc) or type(exc).__name__)
                 LOGGER.debug("Truma session ended: %s", exc)
-                # If the attempt never got a link up, demote that address so
-                # the resolver rotates to another advertised RPA next round
-                # instead of hammering a post-pairing phantom (see bt.py). It
-                # is a demotion, not a ban: when it is the only route left the
-                # resolver still hands it back, which is what a transient
-                # failure (the panel holding the slot of a just-closed session)
-                # needs. Only a failed *connect* leaves _last_addr set; a later
-                # failure clears it.
-                if self._last_addr:
-                    self._avoid.add(self._last_addr)
+                self._note_attempt_failed()
             finally:
-                self._end_operation(self._sync_operation)
                 # Always tear the client down before the next attempt so a
-                # half-open link never lingers holding the proxy's connection
-                # slot (the ghost that otherwise needs a manual power-cycle).
+                # half-open link never lingers holding a connection slot (the
+                # ghost that otherwise needs a manual power-cycle).
+                # ``_disconnect_client`` löscht dabei ``_connected_event``,
+                # und zwar vor seinem eigenen ``await`` -- hier nachträglich
+                # zu löschen kam zu spät (siehe dort).
                 await self._disconnect_client()
-                self._connected_event.clear()
-                self._write_ready_event.clear()
             if connected and self.poll_interval and not self._stop:
                 # Poll mode: the link going away is the plan, not a fault. The
                 # reading we just took is still the current state, so leave the
@@ -493,40 +801,51 @@ class TrumaCoordinator(DataUpdateCoordinator[TrumaState]):
             if connected:
                 # A real connection means our address set is healthy; forget any
                 # past failures so a later reconnect starts from a clean slate.
+                # Auch nach einem Poll: dass der Link danach planmäßig fällt,
+                # macht die Adresse nicht schlechter.
                 self._avoid.clear()
             LOGGER.debug("Truma %s reconnecting in %ss", self.unique_id, delay)
             await self._wait_before_retry(delay)
             if not connected and not self.manual_session_active:
+                # Im Live-Fenster wartet ein Mensch: dann lieber gleich wieder
+                # anklopfen als den Backoff verdoppeln.
                 delay = min(delay * 2, _RECONNECT_DELAY_MAX)
 
-    def _reconnect_delay(self, connected: bool, current: float) -> float:
-        """Return the wait before the next session.
+    def _note_attempt_failed(self) -> None:
+        """Learn from an attempt that ended badly, at both levels.
 
-        A live-mode deadline survives an unexpected BLE drop.  Retry quickly
-        while it is active; otherwise retain the integration's established
-        poll and exponential-backoff behaviour.
+        The address: if the attempt never got a link up, demote it so the
+        resolver rotates to another advertised RPA next round instead of
+        hammering a post-pairing phantom (see bt.py). It is a demotion, not a
+        ban -- when it is the only route left the resolver still hands it back,
+        which is what a transient failure (the panel holding the slot of a
+        just-closed session) needs. Only a failed *connect* leaves
+        ``_last_addr`` set; a later failure clears it.
+
+        The address KIND: if the kind we remember just failed to carry a
+        session, ignore the memory next time and try the other one; if it was
+        the other kind that failed, go back to the memory. Alternating is what
+        keeps a stale memory from wedging a host whose working route changed --
+        a kernel upgrade taking the local adapter away, say. A session that ran
+        and then dropped teaches nothing here, so ``_session_ok`` gates it.
         """
-        if self.manual_session_active or self.hass.loop.time() < getattr(
-            self, "_command_hold_until", 0.0
-        ):
-            return _RECONNECT_DELAY_BASE
-        if connected and self.poll_interval:
-            return self.poll_interval
-        if connected:
-            return _RECONNECT_DELAY_BASE
-        return current
+        if self._last_addr:
+            self._avoid.add(self._last_addr)
+        if not self._session_ok and self._last_kind is not None:
+            self._kind_stale = self._last_kind == self._address_kind
 
     async def _wait_before_retry(self, delay: float) -> None:
-        """Sleep ``delay`` seconds; wake early on stop, or for a pending write.
+        """Sleep ``delay`` seconds; wake early on stop, write or live request.
 
-        ``_writes_pending`` is the source of truth and ``_wake_event`` only the
-        nudge, so a write that lands in the gap between sessions cannot be
-        missed by clearing the event at the wrong moment.
+        ``_writes_pending`` und ``_manual_wake_pending`` sind die Wahrheit,
+        ``_wake_event`` ist nur der Anstoß: ein Befehl oder eine Live-Anfrage,
+        die in die Lücke zwischen zwei Sitzungen fällt, kann so nicht dadurch
+        verlorengehen, dass das Event im falschen Moment gelöscht wird.
         """
         if self._writes_pending or self._manual_wake_pending:
             return
         self._wake_event.clear()
-        if self._writes_pending or self._manual_wake_pending:
+        if self._writes_pending or self._manual_wake_pending:  # set while clearing
             return
         stop = asyncio.ensure_future(self._stop_event.wait())
         wake = asyncio.ensure_future(self._wake_event.wait())
@@ -545,11 +864,16 @@ class TrumaCoordinator(DataUpdateCoordinator[TrumaState]):
         resets the backoff). Raises if the connection could not be established.
         """
         assert self._identity is not None
-        self._write_ready_event.clear()
+        # Nothing has been dialled or proved yet this round. Clearing the kind
+        # matters: an attempt that ends before it picks an address (the panel
+        # silent, nothing connectable) is not evidence about address kinds, and
+        # last round's kind left lying here would flip the memory on it.
+        self._session_ok = False
+        self._last_kind = None
         client = TrumaBleClient(self._identity)
         client.on_data(self._on_frame)
         # Track the client before connecting so a failed/partial connect is
-        # still torn down by _run's finally (freeing the proxy slot).
+        # still torn down by _run's finally (freeing the connection slot).
         self._client = client
 
         # First attempt after a fresh pairing: adopt the live connection the
@@ -564,8 +888,11 @@ class TrumaCoordinator(DataUpdateCoordinator[TrumaState]):
                     self.unique_id,
                     initial.address,
                 )
-                self._remember_proxy_for_address(initial.address)
                 self._last_addr = None
+                # An adopted link was dialled by the config flow, not by us,
+                # so it says nothing about which address kind this host
+                # connects on.
+                self._last_kind = None
                 await client.adopt(initial)
                 self._set_panel_link_connected(True)
                 return await self._finish_startup(client)
@@ -581,15 +908,18 @@ class TrumaCoordinator(DataUpdateCoordinator[TrumaState]):
             except Exception as exc:  # noqa: BLE001 - best effort
                 LOGGER.debug("Truma %s stale handoff disconnect: %s", self.unique_id, exc)
 
-        ble_device = async_resolve_proxy_device(
-            self.hass, self.unique_id, avoid=self._avoid
+        ble_device = async_resolve_device(
+            self.hass,
+            self.unique_id,
+            avoid=self._avoid,
+            prefer_identity=self._prefer_identity(),
         )
         if ble_device is None and self._avoid:
             # Nothing is on air at all, so the grudges are about addresses the
             # panel no longer uses. Drop them: a set that only ever grew would
             # keep demoting whatever the panel comes back on. (It cannot be
             # "everything was avoided" — avoid only demotes, so a reachable
-            # address is always returned; see bt.async_resolve_proxy_device.)
+            # address is always returned; see bt.async_resolve_device.)
             LOGGER.debug(
                 "Truma %s: nothing advertising; forgetting past failures",
                 self.unique_id,
@@ -607,17 +937,18 @@ class TrumaCoordinator(DataUpdateCoordinator[TrumaState]):
                     self.unique_id,
                 )
         if ble_device is None:
-            self._async_note_no_proxy_route()
+            self._async_note_no_route()
             raise HomeAssistantError(
                 f"Truma {self.unique_id} not currently advertising"
             )
         # A resolve that succeeded disproves the issue outright: something
         # connectable reached the panel. (The adopted-handoff path above needs
         # no equivalent -- it only happens straight after pairing, which itself
-        # required a proxy route, so the issue cannot already be raised.)
-        self._async_clear_no_proxy_route()
-        self._remember_proxy_for_address(ble_device.address)
+        # required a working route, so the issue cannot already be raised.)
+        self._async_clear_no_route()
         self._last_addr = ble_device.address
+        self._last_kind = address_kind(self.unique_id, ble_device.address)
+        self._remember_proxy_for_address(ble_device.address)
         # Dial while the panel is still audible: the resolved address is only
         # good for as long as the host's cache of it is (see
         # bt.async_wait_until_heard). A stale dial costs a ~20 s timeout during
@@ -642,117 +973,200 @@ class TrumaCoordinator(DataUpdateCoordinator[TrumaState]):
         return await self._finish_startup(client)
 
     @property
+    def address_kind(self) -> str | None:
+        """Which kind of address the panel last answered on, if known.
+
+        Exposed for diagnostics: it is the one piece of per-host state this
+        integration learns, and a download that does not say which address kind
+        a host settled on cannot explain its connect times.
+        """
+        return self._address_kind
+
+    @property
+    def session_transport(self) -> str | None:
+        """Which transport carried the last session that came up, if any.
+
+        Exposed for diagnostics beside :attr:`address_kind`: the address kind
+        says which address answered, this says which adapter it answered on.
+        Neither is dialled on (see ble.TrumaBleClient.transport).
+        """
+        return self._session_transport
+
+    def device_info(self, addr: int) -> DeviceInfo:
+        """The Home Assistant device an entity at a bus address belongs to.
+
+        One HA device per bus address that has published something, hanging
+        off the panel. That is what the panel is: a gateway onto a TIN bus of
+        Truma appliances, a CI bus of vehicle electrics and third-party air
+        conditioners, a CAN bus and Bluetooth gas sensors. Folding all of it
+        into a single device -- which is what this did, with the model
+        hard-coded to "iNet X (Combi)" -- meant a roof air conditioner's fan
+        and a Combi's fan were two entities on one device with nothing saying
+        which was which.
+
+        The panel itself is that hub rather than a device below it. It is the
+        thing this integration holds a Bluetooth link to, so giving it a
+        second HA device beside the config entry's own would list the same
+        appliance twice. DEV_PANEL is assumed to be the panel's address, as it
+        is everywhere else here; if some installation numbers it differently
+        the cost is one extra device, not a broken one.
+
+        Names come from what the bus says: the panel's own name for a device
+        under Identify.Name, plus the owner's own label for it where there is
+        one -- GasBtl.Name reads "Links" on one bottle and "Rechts" on the
+        other, so the two devices are "Truma LevelControl Links" and "Truma
+        LevelControl Rechts". That is the one identity that survives a
+        re-pairing: the instance is part of the address and is reassigned,
+        while the label is stored in the device. Where no label is published,
+        or two devices share one, the class instance separates them instead --
+        but only where there is something to separate. Two gas-bottle sensors
+        publishing "Truma LevelControl" get 0x0603's and 0x0604's instances,
+        because "Truma LevelControl" twice would be no better than the flat
+        reading that mixed them up; a bus whose names are already distinct
+        keeps them as they are. Measured on the bus of #23, where the suffix
+        used to fire on every instance above 1: a Schaudt block and a Dometic
+        roof unit share device class 0x04 and nothing else, and came up as
+        "EBL25x 5" and "FreshJet 6" -- two numbers answering a question the
+        names had already answered.
+
+        A device that publishes no name is named by its address rather than by
+        a class-to-product mapping that cannot be verified -- those same two
+        share a device class. The one exception is _KNOWN_NAMES, and it is an
+        exception only for addresses that name nothing themselves.
+        """
+        if addr == DEV_PANEL:
+            panel = self._bus.devices.get(addr)
+            return DeviceInfo(
+                identifiers={(DOMAIN, self.unique_id)},
+                # The advertised BLE name, not the panel's Identify.Name:
+                # two panels in one Home Assistant would otherwise be two
+                # devices with the same name.
+                name=self.unique_id,
+                manufacturer=MANUFACTURER,
+                model=(panel.name if panel else None) or MODEL,
+                serial_number=panel.serial if panel else None,
+            )
+        device = self._bus.device(addr)
+        base = device.name or _KNOWN_NAMES.get(addr)
+        label = device.label
+        if base is None and label is None:
+            # Already unique, and already says where it is.
+            name = f"Bus device 0x{addr:04X}"
+        elif base is None:
+            name = label
+        elif label and label != base and self._bus.label_is_unique(addr, label):
+            name = f"{base} {label}"
+        elif self._bus.name_is_unique(addr, base):
+            name = base
+        else:
+            name = f"{base} {device.instance}"
+        info = DeviceInfo(
+            identifiers={(DOMAIN, f"{self.unique_id}_{addr:04X}")},
+            name=name,
+            model=device.name,
+            serial_number=device.serial,
+        )
+        # Hung off the panel, by whichever of the two names for that this
+        # Home Assistant takes.
+        #
+        # ``via_device`` names the hub by its identifiers and is deprecated as
+        # of 2026.8 -- it stops working in 2027.8. ``via_device_id`` names it
+        # by the registry's own id for it, which is why the panel is
+        # registered before any platform is forwarded (see __init__.py): the
+        # id does not exist until it is. Both are kept because this runs on
+        # whatever Home Assistant the vehicle has, and the older one does not
+        # know the new key at all -- it would reject the whole device info and
+        # leave the vehicle with no devices rather than with a flat list.
+        if _VIA_DEVICE_ID and self.hub_device_id is not None:
+            info["via_device_id"] = self.hub_device_id
+        else:
+            info["via_device"] = (DOMAIN, self.unique_id)
+        return info
+
+    def device_is_named(self, addr: int) -> bool:
+        """Whether this address's device name is the one it will keep.
+
+        Home Assistant builds an entity id out of the device's name at the
+        moment the entity is created and never revises it, so an entity built
+        while a device is still "Bus device 0x0201" carries that placeholder
+        for good. Measured on the bus of #23: nine of about seventy entities
+        came up as ``climate.bus_device_0x0201``,
+        ``sensor.bus_device_0x0405_storungscode`` and so on, while their
+        siblings on the same devices came up as ``combi_6_e_*`` and
+        ``ebl25x_5_*`` -- a race, not a rule, and one the owner could only fix
+        by renaming nine entities by hand.
+
+        The race is in the startup order rather than in the bus: subscribing
+        (session.run_startup step 2) makes the panel push values, and the
+        parameter descriptions that carry Identify.Name are not asked for
+        until step 4. So a heater's room temperature routinely arrives a few
+        seconds before the heater's name.
+
+        What the caller waits for is therefore the name, not the value:
+
+        * the panel is named after the config entry and never waits,
+        * a device that has published Identify.Name or its own label is named,
+        * an address in _KNOWN_NAMES is named without publishing anything,
+        * and once discovery has finished, every device that was going to
+          name itself has -- so the address placeholder is the final answer
+          for the rest (0x0601 publishes BleDeviceManagement and no Identify
+          at all) rather than a value still in flight.
+
+        Waiting is safe in a way that not waiting is not: the entities appear
+        seconds later, while a wrong entity id is permanent.
+        """
+        if addr == DEV_PANEL or addr in _KNOWN_NAMES or self._bus.discovered:
+            return True
+        device = self._bus.devices.get(addr)
+        return device is not None and (
+            device.name is not None or device.label is not None
+        )
+
+    @callback
+    def async_sync_device_names(self) -> None:
+        """Rename registered devices whose identity arrived after they were.
+
+        The gate above closes the window for a device that names itself during
+        startup, and this closes it for one that names itself later: a
+        battery-powered gas sensor that wakes up minutes in gets its entities
+        (and therefore its Home Assistant device) as soon as discovery is
+        over, under the address placeholder, and would otherwise keep that
+        name until something else caused an entity to be created.
+
+        The same call is what stops a name going backwards. A device is
+        registered afresh by every entity built on it, so on the vehicle of
+        #23 three named devices fell back to "Bus device 0xNNNN" and lost
+        their model with the name -- an entity created early in a session
+        re-registered the device under the placeholder, and nothing created
+        later put it back.
+
+        ``name_by_user`` is untouched, so a device the owner has renamed keeps
+        the owner's name: Home Assistant shows that in preference to ours.
+        """
+        registry = dr.async_get(self.hass)
+        for addr in list(self._bus.devices):
+            if not self.device_is_named(addr):
+                continue
+            entry = registry.async_get_device(
+                identifiers={(DOMAIN, f"{self.unique_id}_{addr:04X}")}
+            )
+            if entry is None:
+                continue
+            info = self.device_info(addr)
+            if entry.name == info.get("name") and entry.model == info.get("model"):
+                continue
+            registry.async_update_device(
+                entry.id,
+                name=info.get("name"),
+                model=info.get("model"),
+            )
+
+    @property
     def poll_interval(self) -> int:
         """Seconds between polls, or 0 to hold the connection open."""
         return int(
             self.config_entry.options.get(CONF_POLL_INTERVAL, DEFAULT_POLL_INTERVAL)
         )
-
-    @property
-    def manual_session_active(self) -> bool:
-        """Whether a requested timed live session is still active."""
-        return (
-            bool(self.poll_interval)
-            and self.hass.loop.time() < getattr(self, "_manual_hold_until", 0.0)
-        )
-
-    async def async_request_manual_session(self, minutes: int) -> None:
-        """Refresh now and optionally keep poll mode connected for minutes."""
-        if (
-            isinstance(minutes, bool)
-            or not isinstance(minutes, int)
-            or not 0 <= minutes <= _MANUAL_LIVE_MINUTES_MAX
-        ):
-            raise HomeAssistantError(
-                f"Live mode duration must be a whole number from 0 to "
-                f"{_MANUAL_LIVE_MINUTES_MAX} minutes"
-            )
-
-        with self._operation("sync") as token:
-            self._manual_operation = token
-            cancelled = asyncio.Event()
-            self._manual_requests[token] = cancelled
-            try:
-                await self._request_manual_session(minutes, cancelled)
-                if cancelled.is_set():
-                    raise HomeAssistantError("Manual refresh cancelled")
-            except (Exception, asyncio.CancelledError):
-                # A connected refresh establishes its hold before discovery.
-                # Failure must release it, but cannot undo a newer request.
-                if self._manual_operation == token:
-                    self._manual_hold_until = 0.0
-                raise
-            finally:
-                self._manual_requests.pop(token, None)
-                if self._manual_operation == token:
-                    self._manual_hold_request_minutes = None
-                    self._manual_wake_pending = False
-
-    async def _request_manual_session(self, minutes: int, cancelled: asyncio.Event) -> None:
-        """Perform the requested refresh under its operation owner."""
-
-        client = self._client
-        if (
-            client is not None
-            and client.connected
-            and self._connected_event.is_set()
-        ):
-            self._manual_release_requested = False
-            self._manual_hold_until = (
-                self.hass.loop.time() + minutes * 60
-                if self.poll_interval and minutes
-                else 0.0
-            )
-            # Startup has just refreshed the ordinary parameters.  Ask the
-            # on-demand sensors too when the link was already available.
-            revision = self._data_revision
-            await self._discover_params(client)
-            await self._request_measurements(client)
-            if self._data_revision == revision:
-                raise HomeAssistantError("Truma refresh received no fresh panel parameters")
-            return
-
-        self._manual_hold_request_minutes = minutes
-        self._manual_wake_pending = True
-        self._manual_release_requested = False
-        self._connected_event.clear()
-        self._wake_event.set()
-        LOGGER.debug(
-            "Truma %s: manual session requested (%d minute live hold)",
-            self.unique_id,
-            minutes,
-        )
-        connected = asyncio.create_task(self._connected_event.wait())
-        stopped = asyncio.create_task(cancelled.wait())
-        try:
-            done, _ = await asyncio.wait(
-                {connected, stopped}, timeout=_WRITE_CONNECT_TIMEOUT,
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-            if stopped in done:
-                raise HomeAssistantError("Manual refresh cancelled")
-            if connected not in done:
-                raise HomeAssistantError(
-                    "Truma panel did not answer in time for the manual refresh"
-                )
-        finally:
-            connected.cancel()
-            stopped.cancel()
-            await asyncio.gather(connected, stopped, return_exceptions=True)
-
-    async def async_end_manual_session(self) -> None:
-        """Release a manual hold without interrupting an in-flight write."""
-        self._manual_hold_request_minutes = None
-        self._manual_wake_pending = False
-        self._manual_hold_until = 0.0
-        self._manual_release_requested = True
-        for cancelled in self._manual_requests.values():
-            cancelled.set()
-        if not self._writes_pending:
-            self._wake_event.clear()
-        # The poll dwell loop checks this once a second, after checking writes,
-        # and therefore never disconnects underneath an in-flight command.
-        LOGGER.debug("Truma %s: manual live mode released", self.unique_id)
 
     async def _finish_startup(self, client: TrumaBleClient) -> bool:
         """Run startup on a connected client, then hold until the link drops.
@@ -760,13 +1174,10 @@ class TrumaCoordinator(DataUpdateCoordinator[TrumaState]):
         Shared by the fresh-connect and adopted-handoff paths. Returns ``True``
         (the connection is up, so the caller resets the backoff).
         """
-        revision = self._data_revision
         await self._run_startup(client)
-        if self._data_revision == revision:
-            raise HomeAssistantError("Truma synchronization received no fresh panel parameters")
-        self._write_ready_event.set()
-
-        if getattr(self, "_manual_hold_request_minutes", None) is not None:
+        if self._manual_hold_request_minutes is not None:
+            # Erst jetzt läuft die Live-Zeit an: der Handshake kostet auf dem
+            # Fahrzeug rund 25 s, und die gehören nicht dem Nutzer weggerechnet.
             minutes = self._manual_hold_request_minutes
             self._manual_hold_request_minutes = None
             self._manual_wake_pending = False
@@ -776,45 +1187,71 @@ class TrumaCoordinator(DataUpdateCoordinator[TrumaState]):
                 if self.poll_interval and minutes
                 else 0.0
             )
+        # Every device on the bus has now been asked to describe itself, so
+        # whatever has not named itself by here is not going to: anything
+        # waiting for a device's identity may stop waiting (see
+        # device_is_named).
+        self._bus.discovered = True
+        self._session_ok = True
+        self._session_transport = client.transport
+        if self._last_kind is not None:
+            # The panel answered, encrypted and subscribed on this address, so
+            # this is the kind that works here. Connecting alone would not have
+            # been proof: a path can establish a link and then fail to encrypt.
+            await self._remember_address_kind(self._last_kind)
 
         # In poll mode this stays True between polls: it means "we are in
         # touch with the panel", not "a link is open this instant". The link
         # coming and going every interval is an implementation detail and
         # should not flap the connectivity sensor or blank every entity.
-        self._state.connected = True
-        self._state.assigned_addr = client.assigned_addr
-        self.async_set_updated_data(self._state)
+        self._bus.connected = True
+        self._bus.assigned_addr = client.assigned_addr
+        self.async_set_updated_data(self._bus)
+        self.async_sync_device_names()
         LOGGER.info("Truma %s connected and subscribed", self.unique_id)
         self._connected_event.set()
-        if (token := getattr(self, "_sync_operation", None)) is not None:
-            self._end_operation(token)
 
         # Startup just delivered frames, so seed the watchdog from now.
         self._last_frame = self.hass.loop.time()
+
+        # Auch der Poll-Zweig misst nach, solange ein Live-Fenster läuft.
+        next_measure = self.hass.loop.time() + _MEASURE_INTERVAL
 
         if self.poll_interval:
             # Poll mode: the reading is in hand, so let the link go and free the
             # connection slot. Wait only until the panel stops talking.
             started = self.hass.loop.time()
-            next_measure = self.hass.loop.time() + _MEASURE_INTERVAL
+            # Die Reihenfolge dieser Prüfungen ist bindend, und jede
+            # Vertauschung hat ein Gesicht:
+            #   Writes/manuelle Anfragen -> Release-Wunsch -> Command-Hold ->
+            #   Live-Fenster -> Stille -> Verweilgrenze
+            # Der Release vor den Writes legte mitten im Befehl auf; der
+            # Command-Hold vor dem Release ließe "Live-Modus beenden" eine
+            # Minute lang wirkungslos; das Live-Fenster vor dem Command-Hold
+            # ließe den Stall-Watchdog den Nachlauf abreißen, der gerade für
+            # ein schweigendes Gerät da ist.
             while not self._stop and client.connected:
                 await asyncio.sleep(1)
                 if self._writes_pending or self._manual_requests:
-                    # A command or manual read owns the session until done.
+                    # Ein Befehl oder ein manueller Lesevorgang besitzt die
+                    # Sitzung, bis er fertig ist.
                     started = self.hass.loop.time()
                     continue
-                if getattr(self, "_manual_release_requested", False):
+                if self._manual_release_requested:
                     self._manual_release_requested = False
                     self._manual_hold_until = 0.0
                     break
                 now = self.hass.loop.time()
-                if now < getattr(self, "_command_hold_until", 0.0):
+                if now < self._command_hold_until:
+                    # Nachlauf nach einem Befehl: weder Stille noch die
+                    # Verweilgrenze beenden den Poll, solange das Fenster läuft.
+                    # ``started`` bleibt stehen, damit der Hold den Link nicht
+                    # über sein eigenes Ende hinaus offen hält.
                     continue
-                manual_active = (
-                    bool(self.poll_interval)
-                    and now < getattr(self, "_manual_hold_until", 0.0)
-                )
-                if manual_active:
+                if self.manual_session_active:
+                    # Live-Fenster: der Link bleibt, auch wenn niemand redet.
+                    # Beenden kann ihn nur der Stall-Watchdog -- die Stille
+                    # ist hier ja gerade kein Grund aufzulegen.
                     if now >= next_measure:
                         next_measure = now + _MEASURE_INTERVAL
                         await self._request_measurements(client)
@@ -846,7 +1283,6 @@ class TrumaCoordinator(DataUpdateCoordinator[TrumaState]):
 
         # Connected mode: hold the link, watching for a data stall and keeping
         # the on-demand sensors measuring.
-        next_measure = self.hass.loop.time() + _MEASURE_INTERVAL
         while not self._stop and client.connected:
             await asyncio.sleep(1)
             now = self.hass.loop.time()
@@ -866,275 +1302,129 @@ class TrumaCoordinator(DataUpdateCoordinator[TrumaState]):
         return True
 
     async def _run_startup(self, client: TrumaBleClient) -> None:
-        """Register, subscribe to all topics, send identity, discover params.
+        """Run the session's startup sequence on a connected client.
 
-        Raises if the panel never assigns us an address. That is the one point
-        in startup where the link proves it actually carries traffic, and
-        everything after it depends on the answer.
+        The sequence itself lives in ``session.py``, which imports no Home
+        Assistant, so that it can also be driven from a terminal against real
+        hardware (``tools/dump_bus.py --live``).
+        What is left here is the translation into Home Assistant's own
+        exception, so that the session loop keeps seeing one kind of failure.
         """
-        # 1. Register and wait for an assigned address.
-        await client.send(build_register_frame(client.assigned_addr))
-        for _ in range(_REGISTER_TIMEOUT):
-            await asyncio.sleep(1)
-            if client.assigned_addr != DEV_APP_DEFAULT:
-                break
-        else:
-            # Every frame from here on would be sent from the default app
-            # address, which the message broker does not route, so carrying on
-            # can only produce a session that looks connected and delivers
-            # nothing. Measured on the van (2026-09-07 22:09): the link came
-            # up, notifications subscribed, and BlueZ then lost the ATT
-            # channel -- every write failed with "Service Discovery has not
-            # been performed yet", the panel never answered registration, and
-            # startup ran to completion anyway. Entities sat blank and
-            # "connected" for the full 90 s the stall watchdog takes, and 18
-            # parameter-discovery frames were spent on a dead link.
-            #
-            # Failing here instead hands the link straight back, which also
-            # frees the adapter's connection slot for the next attempt.
-            #
-            # Warn rather than leave it to the session-ended debug line: a
-            # link that connects and then carries nothing is the failure
-            # people report as "it just stopped working", and it is invisible
-            # without this.
+        try:
+            await asyncio.wait_for(
+                session.run_startup(
+                    client,
+                    self._bus,
+                    self._identity,
+                    self.unique_id,
+                    self.hass.loop.time,
+                ),
+                _STARTUP_TIMEOUT,
+            )
+        except TimeoutError as exc:
             message = (
-                f"Truma {self.unique_id}: the panel assigned us no address "
-                f"within {_REGISTER_TIMEOUT}s; the link is up but carries "
-                "nothing, so the session is being dropped and retried"
+                f"Truma {self.unique_id}: startup did not finish within "
+                f"{_STARTUP_TIMEOUT}s; the session is being dropped and retried"
             )
             LOGGER.warning(message)
-            raise HomeAssistantError(message)
-
-        # 2. Subscribe to all topic batches.
-        for batch in TOPIC_BATCHES:
-            await client.send(build_subscribe_frame(client.assigned_addr, batch))
-            await asyncio.sleep(0.5)
-        await asyncio.sleep(3)
-
-        # 3. Send the identity sequence.
-        for frame in build_identity_frames(client.assigned_addr, self._identity):
-            await client.send(frame)
-            await asyncio.sleep(0.5)
-
-        # 4. Request current values from every device on the bus.
-        await self._discover_params(client)
-
-        # 5. ...and for the sensors that only measure when asked, ask. Step 4
-        # returns their last measurement, which on a tank can be hours old, so
-        # without this the first reading of every session is stale — and in
-        # poll mode, where the link is not held, it would be the only reading.
-        await self._request_measurements(client)
-        # _finish_startup publishes readiness only with fresh panel data.
+            raise HomeAssistantError(message) from exc
+        except session.StartupFailed as exc:
+            raise HomeAssistantError(str(exc)) from exc
 
     async def _discover_params(self, client: TrumaBleClient) -> None:
-        """Ask each bus device for its current parameter values, one by one.
+        """Jedes Busgerät nach seinen aktuellen Werten fragen; siehe session.py.
 
-        Asking only the heater and the panel (what this used to do) leaves
-        every other device empty until it happens to push a change of its own,
-        so tank levels, gas-bottle levels and the mains/battery readings are
-        blank after every restart while the panel shows them on its screen.
-        A broadcast does not help: nothing but the heater and the panel answers
-        one.
-
-        The address list is the seed unioned with whoever has already spoken
-        to us, because the seed cannot be authoritative -- devices are
-        renumbered when they are re-paired. The replies to the first round
-        carry their senders' addresses, so a second round picks up anything
-        the seed missed. Each address is asked once: a device that answers
-        must not be asked again, or every startup pays for the list twice.
+        Dasselbe, was der Startup als Schritt 4 tut -- hier für eine bereits
+        offene Verbindung, die niemand dafür neu aufbauen soll.
         """
-        # Open with one broadcast. Only the heater and the panel answer it,
-        # and the directed rounds below cover both -- but it costs a single
-        # frame, and an answer from anything else lands its address in
-        # seen_devices, which is how a device outside every seeded class gets
-        # asked directly in the second round.
-        await client.send(
-            build_v3_frame(
-                DEV_BROADCAST, client.assigned_addr, CTRL_MBP, MBP_PARAM_DISC, 0, b""
-            )
-        )
-        await asyncio.sleep(_PARAM_DISC_GAP)
-
-        asked: set[int] = set()
-        acked: set[int] = set()
-        started = self.hass.loop.time()
-        for _ in range(2):
-            # Measured on the van: the panel sends frames whose src is the
-            # address it assigned *us*, so without the last term we ask
-            # ourselves for parameters. It is answered like any other address
-            # and costs only a frame, which is why it would never be noticed.
-            targets = (
-                (DEVICE_SEED | self._state.seen_devices)
-                - asked
-                - {client.assigned_addr}
-            )
-            if not targets:
-                break
-            for dev_addr in sorted(targets):
-                if await client.send(
-                    build_v3_frame(
-                        dev_addr, client.assigned_addr, CTRL_MBP, MBP_PARAM_DISC, 0, b""
-                    )
-                ):
-                    acked.add(dev_addr)
-                asked.add(dev_addr)
-                await asyncio.sleep(_PARAM_DISC_GAP)
-            await asyncio.sleep(_PARAM_DISC_SETTLE)
-
-        # An address with nothing behind it should cost one frame -- but if the
-        # panel withholds the transport acknowledgement for those, each one
-        # costs a timeout instead, and the seed becomes a minute of dead time
-        # per connect. Report both numbers so that is measurable from a log
-        # rather than guessed at.
-        # Name the addresses that are not in the seed separately: those are the
-        # ones this installation taught us, and seeing them is how a bus the
-        # seed does not describe gets reported without asking for a capture.
-        LOGGER.debug(
-            "Truma %s: parameter discovery asked %d device(s), %d acknowledged, "
-            "in %.1fs (learned here: %s) (no ack: %s)",
-            self.unique_id,
-            len(asked),
-            len(acked),
-            self.hass.loop.time() - started,
-            ", ".join(f"0x{a:04X}" for a in sorted(asked - DEVICE_SEED)) or "none",
-            ", ".join(f"0x{a:04X}" for a in sorted(asked - acked)) or "none",
+        await session.discover_params(
+            client, self._bus, self.unique_id, self.hass.loop.time
         )
 
     async def _request_measurements(self, client: TrumaBleClient) -> None:
-        """Ask the on-demand sensors to take a fresh reading.
-
-        A tank sensor reports the level it last measured and nothing else, so
-        its value only moves when someone asks it to measure — which the panel
-        does when its water screen is opened, and nothing else on the bus does.
-        That is the whole of issue #4: the sensor was right, it was answering a
-        question asked hours ago.
-
-        A topic is asked only once its own parameter has been reported, which
-        is the same evidence the entities are created on (see
-        ``async_add_when_reported``). Most vehicles have no tanks at all, and
-        every one of them subscribes to these topics regardless, so asking
-        unconditionally would put two writes a minute on every bus to answer a
-        question nobody had.
-
-        The destination is whoever reported the topic. The tanks hang off an
-        electrical block whose address differs per vehicle and is renumbered
-        when it is re-paired, so there is no address to hard-code — 0x0405 was
-        this reporter's, not anybody's.
-        """
-        for topic, evidence in MEASURE_REQUEST_TOPICS.items():
-            if f"{topic}.{evidence}" not in self._state.raw_params:
-                continue
-            dest = self._state.get_command_dest(topic)
-            LOGGER.debug(
-                "Truma %s: asking 0x%04X for a fresh %s measurement",
-                self.unique_id,
-                dest,
-                topic,
-            )
-            await client.send(
-                build_write_frame(
-                    client.assigned_addr, dest, topic, MEASURE_REQUEST_PARAM, 1
-                )
-            )
-            await asyncio.sleep(_MEASURE_GAP)
+        """Ask the on-demand sensors for a fresh reading; see session.py."""
+        await session.request_measurements(client, self._bus, self.unique_id)
 
     @callback
     def _on_frame(self, parsed: dict) -> None:
-        """Handle a decoded V3 frame and update state."""
+        """Handle a decoded V3 frame and update state.
+
+        The decoding itself is in ``session.handle_frame``, which imports no
+        Home Assistant, so the same frames can be filed into a bus from a
+        terminal. What is left here is the two things only Home Assistant
+        cares about: the stall watchdog, and telling the entities.
+        """
         # Any frame proves the link is alive; feed the stall watchdog.
         self._last_frame = self.hass.loop.time()
+        # ...and it may be the answer a pending write is waiting for.
+        self._note_frame_values(parsed)
 
-        # ...and proves its sender exists at that address, which is how
-        # parameter discovery reaches devices no seed could have predicted.
-        # Neither pseudo-address is a device, and nor are we: the panel puts
-        # our own assigned address in src on some frames.
-        src = parsed.get("src")
-        if isinstance(src, int) and src not in (
-            DEV_BROADCAST,
-            DEV_MSG_BROKER,
-            self._state.assigned_addr,
-        ):
-            self._state.seen_devices.add(src)
+        if session.handle_frame(self._bus, parsed, self._client, self.unique_id):
+            self.async_set_updated_data(self._bus)
+            # A frame can carry the Identify.Name of a device that is already
+            # registered, which is the one thing the entity-creation gate
+            # cannot cover.
+            self.async_sync_device_names()
 
-        control = parsed.get("control_raw")
-        sub_type = parsed.get("sub_type")
-        cbor = parsed.get("cbor")
-        if not isinstance(cbor, dict):
-            return
+    @callback
+    def _note_frame_values(self, parsed: dict) -> None:
+        """Jeden Wert eines Frames für eine wartende Schreibbestätigung anbieten.
 
-        # Registration response -> assigned address.
-        if control == 0x01 and sub_type == 0x02:
-            addr = cbor.get("addr")
-            if addr and self._client is not None:
-                self._client.assigned_addr = addr
-                self._state.assigned_addr = addr
-            return
+        Zwei Frameformen tragen Werte, und beide zählen: die unaufgeforderte
+        Einzelmeldung (``tn``/``pn``/``v`` direkt im CBOR) und die Antwort auf
+        die Parameter-Abfrage, mit der ``_write_confirmed`` ein schlafendes
+        Gerät weckt (``topics`` mit verschachtelten ``parameters``). Nur die
+        erste zu lesen hieße, genau die Antwort zu verpassen, um die wir eben
+        gebeten haben.
 
-        # Info message -> single parameter update.
-        if control == 0x03 and sub_type == 0x00:
-            tn, pn, v = cbor.get("tn"), cbor.get("pn"), cbor.get("v")
-            if tn and pn:
-                self._learn_param(tn, pn, cbor, parsed.get("src"))
-            if tn and pn and v is not None:
-                self._state.update(tn, pn, v, parsed.get("src"))
-                if isinstance(src, int) and src not in (DEV_BROADCAST, DEV_MSG_BROKER, self._state.assigned_addr):
-                    self._data_revision = getattr(self, "_data_revision", 0) + 1
-                if getattr(self, "_write_feedback", None) is not None:
-                    self._write_feedback[(src, tn, pn)] = v
-                self.async_set_updated_data(self._state)
-            return
-
-        # Parameter-discovery response -> nested current values.
-        if control == 0x03 and sub_type == 0x84:
-            for topic in cbor.get("topics", []) or []:
-                if not isinstance(topic, dict):
-                    continue
-                tn = topic.get("tn", "")
-                for param in topic.get("parameters", []) or []:
-                    if not isinstance(param, dict):
-                        continue
-                    pn, v = param.get("pn"), param.get("v")
-                    if tn and pn:
-                        self._learn_param(tn, pn, param, parsed.get("src"))
-                    if tn and pn and v is not None:
-                        self._state.update(tn, pn, v, parsed.get("src"))
-                        if isinstance(src, int) and src not in (DEV_BROADCAST, DEV_MSG_BROKER, self._state.assigned_addr):
-                            self._data_revision = getattr(self, "_data_revision", 0) + 1
-                        if getattr(self, "_write_feedback", None) is not None:
-                            self._write_feedback[(src, tn, pn)] = v
-            self.async_set_updated_data(self._state)
-            return
-
-    def _learn_param(
-        self, topic: str, param: str, entry: dict, src: int | None = None
-    ) -> None:
-        """Keep the panel's description of a parameter, and log it once.
-
-        The panel names its own enum values (see TrumaState.learn_param), so a
-        question like issue #15 -- what does System.FlameStatus == 2 mean on a
-        Combi 6 E, when the integration models it as on/off -- is answered by a
-        debug log or a diagnostics download rather than by asking somebody to
-        watch their panel while their heater ignites.
-
-        Logged only when the description changes, which in practice means once
-        per parameter per installation: the state object outlives a reconnect,
-        and a panel describes a parameter the same way every time.
+        Das Auseinandernehmen der Frames ist sonst ``session.handle_frame``s
+        Sache; hier steht es, weil nur der Coordinator weiß, welcher Wert
+        gerade erwartet wird -- und weil außerhalb eines Schreibvorgangs
+        nichts davon getan wird.
         """
-        if self._state.learn_param(topic, param, entry, src):
-            LOGGER.debug(
-                "Truma %s: panel describes %s.%s as %s",
-                self.unique_id,
-                topic,
-                param,
-                self._state.param_meta.get(f"{topic}.{param}"),
-            )
+        if not self._write_feedback:
+            return
+        src = parsed.get("src")
+        cbor = parsed.get("cbor")
+        if not isinstance(src, int) or not isinstance(cbor, dict):
+            return
+        topic, param, value = cbor.get("tn"), cbor.get("pn"), cbor.get("v")
+        if topic and param and value is not None:
+            self.on_frame_value(src, topic, param, value)
+        for entry in cbor.get("topics") or []:
+            if not isinstance(entry, dict):
+                continue
+            topic = entry.get("tn", "")
+            for item in entry.get("parameters") or []:
+                if not isinstance(item, dict):
+                    continue
+                param, value = item.get("pn"), item.get("v")
+                if topic and param and value is not None:
+                    self.on_frame_value(src, topic, param, value)
+
+    @callback
+    def on_frame_value(self, addr: int, topic: str, param: str, value: int) -> None:
+        """Einen eingetroffenen Wert für eine wartende Schreibbestätigung merken.
+
+        Der Eintrag wird beim Prüfen per ``pop`` entfernt, und
+        ``_write_confirmed`` räumt ihn vor jedem Anlauf weg: bestätigen darf
+        nur eine Meldung, die nach dem Frame eingetroffen ist. Der Bus taugt
+        dafür nicht -- der hält auch den Wert von vorher, und ein Befehl, der
+        nichts bewirkt, würde sich aus dem Cache selbst bestätigen.
+
+        Jeder laufende Vorgang bekommt denselben Wert in sein eigenes Buch:
+        eine Meldung kann die Antwort auf zwei gleichzeitig wartende Befehle
+        sein, und keiner von beiden darf sie dem anderen wegnehmen.
+        """
+        for book in self._write_feedback.values():
+            book[(addr, topic, param)] = value
 
     @callback
     def _mark_disconnected(self) -> None:
         """Flag the link as down and notify entities."""
-        if self._state.connected:
-            self._state.connected = False
-            self.async_set_updated_data(self._state)
+        if self._bus.connected:
+            self._bus.connected = False
+            self.async_set_updated_data(self._bus)
 
     async def _client_for_write(self) -> TrumaBleClient:
         """A connected client to write through, waking a poll if need be.
@@ -1146,15 +1436,25 @@ class TrumaCoordinator(DataUpdateCoordinator[TrumaState]):
         poll will not hang up while the write is outstanding.
         """
         client = self._client
-        if client is None or not client.connected:
-            if not self.poll_interval:
-                raise HomeAssistantError("Truma panel is not connected")
-            LOGGER.debug("Truma %s: write requested; waking a poll", self.unique_id)
-            self._write_ready_event.clear()
-            self._wake_event.set()
+        if client is not None and client.connected:
+            return client
+        if not self.poll_interval:
+            raise HomeAssistantError("Truma panel is not connected")
+
+        # Wir haben eben festgestellt, dass kein brauchbarer Client da ist --
+        # also darf auch das Event keinen behaupten, sonst kehrt das Warten
+        # unten sofort zurück und der Befehl scheitert nach 0 ms. Dieselbe
+        # Vorsichtsmaßnahme wie in ``_request_manual_session``, und sie deckt
+        # den Fall ab, den ``_disconnect_client`` noch nicht erreicht hat: ein
+        # Client, der bereits tot ist, aber noch hängt. Zwischen der Prüfung
+        # oben und diesem ``clear`` liegt kein ``await``, der Stand kann uns
+        # also nicht unter den Händen veralten.
+        self._connected_event.clear()
+        LOGGER.debug("Truma %s: write requested; waking a poll", self.unique_id)
+        self._wake_event.set()
         try:
             await asyncio.wait_for(
-                self._write_ready_event.wait(), timeout=_WRITE_CONNECT_TIMEOUT
+                self._connected_event.wait(), timeout=_WRITE_CONNECT_TIMEOUT
             )
         except TimeoutError:
             raise HomeAssistantError(
@@ -1165,103 +1465,185 @@ class TrumaCoordinator(DataUpdateCoordinator[TrumaState]):
             raise HomeAssistantError("Truma panel is not connected")
         return client
 
+    async def async_write(
+        self, addr: int, topic: str, param: str, value: int
+    ) -> None:
+        """Einen einzelnen Parameter schreiben und bestätigen lassen."""
+        await self.async_write_many([(addr, topic, param, value)])
+
     async def async_write_many(
-        self, commands: list[tuple[str, str, int]], *, confirm: bool = True,
-        action: str | None = None, target=None,
+        self,
+        commands: list[tuple[int, str, str, int]],
+        *,
+        action: str | None = None,
+        target: object = None,
     ) -> None:
-        """Serialize a user action and require fresh device feedback.
+        """Mehrere Parameter als eine Nutzeraktion schreiben und bestätigen lassen.
 
-        The panel confirms by pushing an updated value, which flows back through
-        the normal notification path and updates the entity.
+        ``addr`` ist jeweils die Busadresse des Geräts der Entität, und dorthin
+        geht der Befehl -- einzige Ausnahme sind die wenigen Topics, die das
+        Panel für den Bus weiterreicht (siehe ``COMMAND_DEST``). Einen Befehl
+        an ein Gerät zu adressieren, das in der Quelle genannt wird, war die
+        Fehlerklasse von #10: ein AirCooling.TgtTemp an die Combi wurde vom
+        Transport quittiert und dann still verworfen, weil auf jenem Fahrzeug
+        ein Dachgerät kühlt.
+
+        Und genau dort hört ein Transport-ACK auf zu taugen: er sagt, dass das
+        Panel den Frame genommen hat, nicht dass danach etwas geschehen ist.
+        Gemessen wurde ein quittierter Befehl, den die Heizung während des
+        Nachlüftens nicht ausführte. Bestätigt ist ein Schreibvorgang erst,
+        wenn das Zielgerät den neuen Wert selbst meldet.
+
+        Alle Befehle werden zuerst geprüft und erst dann gesendet: eine
+        Transaktion, die auf halbem Weg an der eigenen Validierung scheitert,
+        ließe das Fahrzeug in einem Zustand zurück, den niemand angefordert
+        hat.
         """
-        if not commands:
-            return
-        inferred_action, inferred_target = self._command_operation(commands)
-        with self._operation(action or inferred_action, target if action else inferred_target):
-            # Retain the keyword for existing callers, but transport ACK alone
-            # can never complete a user operation successfully.
-            await self._write_many(commands)
-
-    def _write_confirmed(self, dest: int, topic: str, param: str, value: int) -> bool:
-        """Match fresh device feedback to the meaning of this exact command."""
-        reported = (self._write_feedback or {}).get((dest, topic, param))
-        if (topic, param, value) == ("WaterHeating", "Active", 1):
-            # WaterHeating.Active reports 0=off, 1=heating, 2=enabled but idle.
-            # Water already at its target can immediately report 2 after an
-            # enable request. It still confirms enabled, never switched off.
-            # Do not apply this equivalence to modes, power levels or cached
-            # state: those still require the exact fresh value and source.
-            return reported in (1, 2)
-        return reported == value
-
-    async def _write_many(
-        self, commands: list[tuple[str, str, int]]
-    ) -> None:
-        """Serialize writes while the public operation includes queue time."""
-        for topic, param, value in commands:
-            ok, msg = self._state.validate_write(topic, param, value)
+        for addr, topic, param, value in commands:
+            ok, msg = self._bus.validate_write(addr, topic, param, value)
             if not ok:
                 raise HomeAssistantError(f"Invalid Truma command: {msg}")
 
-        # Held across the whole write, not just the wait for a link: in poll
-        # mode the loop checks this before hanging up, and releasing it early
-        # would let it disconnect between getting the client and sending.
-        self._writes_pending += 1
-        try:
-            async with self._command_lock:
+        with self._operations.operation(
+            action or self._infer_action(commands), target
+        ) as token:
+            # Über den ganzen Vorgang gehalten, nicht nur über das Warten auf
+            # einen Link: im Poll-Betrieb prüft die Schleife das, bevor sie
+            # auflegt, und ein früh freigegebenes Flag ließe sie zwischen
+            # Client-Holen und Senden auflegen.
+            self._writes_pending += 1
+            # Ein Befehl widerruft einen Release-Wunsch: wer gerade bedient,
+            # will die Verbindung, auch wenn er eben noch "beenden" gedrückt
+            # hat.
+            self._manual_release_requested = False
+            # Das eigene Buch dieses Vorgangs. Ein zweiter Vorgang, der
+            # währenddessen anläuft, legt sein eigenes daneben und lässt
+            # dieses unberührt.
+            feedback: dict[tuple[int, str, str], int] = {}
+            self._write_feedback[token] = feedback
+            try:
                 client = await self._client_for_write()
-                self._manual_release_requested = False
-                self._write_feedback = {}
-                try:
-                    for topic, param, value in commands:
-                        dest = self._state.get_command_dest(topic)
-                        frame = build_write_frame(
-                            client.assigned_addr, dest, topic, param, value
-                        )
-                        LOGGER.debug(
-                            "Truma write %s.%s = %s -> 0x%04X", topic, param, value, dest
-                        )
-                        for attempt in range(3):
-                            self._write_feedback.pop((dest, topic, param), None)
-                            await client.send(frame)
-                            # Heater wake-up can outlast panel registration.
-                            # Retry these absolute parameter setpoints only
-                            # after checking fresh feedback for the requested state.
-                            await client.send(build_v3_frame(
-                                dest, client.assigned_addr, CTRL_MBP, MBP_PARAM_DISC, 0, b""
-                            ))
-                            deadline = self.hass.loop.time() + _WRITE_FEEDBACK_TIMEOUT
-                            while (
-                                client.connected
-                                and self.hass.loop.time() < deadline
-                                and not self._write_confirmed(dest, topic, param, value)
-                            ):
-                                await asyncio.sleep(0.1)
-                            if self._write_confirmed(dest, topic, param, value):
-                                break
-                            if not client.connected or attempt == 2:
-                                raise HomeAssistantError(
-                                    f"Truma did not confirm {topic}.{param}={value}; "
-                                    "check the panel and try again"
-                                )
-                            LOGGER.debug("Truma retry %s.%s=%s after missing feedback", topic, param, value)
-                            await asyncio.sleep(2)
-                    if len(commands) > 1:
-                        # Let delayed notifications settle before declaring the
-                        # complete multi-parameter setting successful.
-                        await asyncio.sleep(1)
-                    for topic, param, value in commands:
-                        dest = self._state.get_command_dest(topic)
-                        if not self._write_confirmed(dest, topic, param, value):
-                            raise HomeAssistantError("Truma did not retain the requested setting")
-                finally:
-                    self._write_feedback = None
-                    self._command_hold_until = (
-                        self.hass.loop.time() + _COMMAND_HOLD_SECONDS
+                for addr, topic, param, value in commands:
+                    dest = self._bus.command_dest(addr, topic)
+                    await self._write_confirmed(
+                        client, dest, topic, param, value, feedback
                     )
-        finally:
-            self._writes_pending -= 1
+                if len(commands) > 1:
+                    # Jeder einzelne Befehl wurde bestätigt -- was nicht heißt,
+                    # dass am Ende alle zugleich gelten. Eine Heizung kann eine
+                    # frühere Einstellung zurücknehmen, während die nächste
+                    # ankommt (Gas und Strom schließen sich je nach Modus aus).
+                    await asyncio.sleep(_WRITE_SETTLE)
+                    for addr, topic, param, value in commands:
+                        dest = self._bus.command_dest(addr, topic)
+                        got = self._bus.device(dest).get(topic, param)
+                        if not isinstance(got, int) or not self._feedback_satisfied(
+                            topic, param, value, got
+                        ):
+                            raise HomeAssistantError(
+                                f"Truma did not retain the requested setting "
+                                f"{topic}.{param}={value}"
+                            )
+            finally:
+                self._write_feedback.pop(token, None)
+                self._writes_pending -= 1
+                # Auch nach einem Fehlschlag: der Nutzer soll sofort
+                # nachsteuern können, ohne auf den nächsten Poll zu warten.
+                self._hold_after_command()
 
-    async def async_write(self, topic: str, param: str, value: int) -> None:
-        """Send one parameter write as an atomic user action."""
-        await self.async_write_many([(topic, param, value)], confirm=True)
+    async def _write_confirmed(
+        self,
+        client: TrumaBleClient,
+        dest: int,
+        topic: str,
+        param: str,
+        value: int,
+        feedback: dict[tuple[int, str, str], int],
+    ) -> None:
+        """Einen Parameter schreiben und auf die Bestätigung des Geräts warten.
+
+        ``feedback`` ist das Buch des eigenen Vorgangs und wird durchgereicht
+        statt über ``self`` geholt: ein gleichzeitiger zweiter Schreibvorgang
+        soll hier nichts anfassen können.
+        """
+        for attempt in range(_WRITE_ATTEMPTS):
+            # Alles, was vor diesem Anlauf gemeldet wurde, zählt nicht: es kann
+            # den Stand von vor dem Befehl tragen, und eine Meldung, die zufällig
+            # schon den Wunschwert trug, würde den Befehl bestätigen, ohne dass
+            # er je ausgeführt wurde.
+            feedback.pop((dest, topic, param), None)
+            frame = build_write_frame(client.assigned_addr, dest, topic, param, value)
+            LOGGER.debug("Truma write %s.%s = %s -> 0x%04X", topic, param, value, dest)
+            if not await client.send(frame):
+                raise HomeAssistantError(
+                    f"Truma did not acknowledge write {topic}.{param}={value}"
+                )
+            # Ein schlafender oder gerade aufwachender Brenner schickt den
+            # geänderten Wert nicht von selbst -- also danach fragen.
+            await self._request_param_discovery(client, dest)
+            if await self._await_feedback(dest, topic, param, value, feedback):
+                return
+            if not client.connected or attempt == _WRITE_ATTEMPTS - 1:
+                break
+            await asyncio.sleep(_WRITE_RETRY_PAUSE)
+        raise HomeAssistantError(f"Truma did not confirm {topic}.{param}={value}")
+
+    async def _await_feedback(
+        self,
+        dest: int,
+        topic: str,
+        param: str,
+        value: int,
+        feedback: dict[tuple[int, str, str], int],
+    ) -> bool:
+        """Auf eine frische Meldung des Zielgeräts warten."""
+        deadline = self.hass.loop.time() + _WRITE_FEEDBACK_TIMEOUT
+        while self.hass.loop.time() < deadline:
+            await asyncio.sleep(0.2)
+            got = feedback.pop((dest, topic, param), None)
+            if got is None:
+                continue
+            if self._feedback_satisfied(topic, param, value, got):
+                return True
+        return False
+
+    @staticmethod
+    def _feedback_satisfied(topic: str, param: str, wanted: int, got: int) -> bool:
+        """Ob die Rückmeldung den gewünschten Wert bestätigt.
+
+        Überall exakt -- mit genau einer Ausnahme: ``WaterHeating.Active``
+        meldet 1 (heizt) oder 2 (ein, Solltemperatur erreicht), und beides
+        heißt "ein". Die Temperaturstufe ``WaterHeating.Mode`` und jedes
+        andere ``Active`` sind davon nicht berührt.
+        """
+        if (topic, param) == ("WaterHeating", "Active") and wanted == 1:
+            return got in _ENABLED_STATES
+        return got == wanted
+
+    async def _request_param_discovery(
+        self, client: TrumaBleClient, dest: int
+    ) -> None:
+        """Ein Gerät bitten, seine Parameter erneut zu melden.
+
+        Als Sonde gesendet: ein schlafendes Gerät darf schweigen, ohne dass
+        der Transport die Sitzung für mehrdeutig erklärt -- das Ausbleiben der
+        Antwort behandelt der Anlauf selbst.
+        """
+        frame = build_v3_frame(
+            dest, client.assigned_addr, CTRL_MBP, MBP_PARAM_DISC, 0, b""
+        )
+        await client.send(frame, probe=True)
+
+    @staticmethod
+    def _infer_action(commands: list[tuple[int, str, str, int]]) -> str:
+        """Aus dem letzten Befehl einen Namen für die Anzeige ableiten."""
+        _addr, topic, param, _value = commands[-1]
+        return {
+            ("RoomClimate", "Mode"): "hvac_mode",
+            ("AirHeating", "TgtTemp"): "temperature",
+            ("AirCirculation", "FanLevel"): "fan_level",
+            ("EnergySrc", "ElectricLevel"): "electric_heating",
+            ("WaterHeating", "Active"): "water_mode",
+            ("WaterHeating", "Mode"): "water_mode",
+            ("WaterHeating", "FasterHeatingMode"): "water_priority",
+        }.get((topic, param), f"{topic}.{param}")

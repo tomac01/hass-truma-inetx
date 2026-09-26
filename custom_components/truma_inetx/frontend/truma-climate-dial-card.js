@@ -88,6 +88,56 @@ class TrumaClimateDialCard extends HTMLElement {
     this._pending = null; // value being dragged or stepped, not yet sent
   }
 
+  // What the card picker puts in a brand new card. Without this Home Assistant
+  // creates the card as bare {type: ...}: setConfig below then throws, the
+  // picker's preview is an error card, and the "add card to this device" flow
+  // cannot fill the entity in either -- it only substitutes one when the stub
+  // already HAS an entity key (hui-dialog-create-card: `"entity" in config`).
+  // So the card looked present but could not be added.
+  static getStubConfig(hass, entities, entitiesFallback) {
+    const climate = (id) => id.startsWith("climate.");
+    // hass.entities is the entity registry the frontend holds; it knows which
+    // integration an entity came from, which hass.states does not.
+    const ours = (id) =>
+      hass && hass.entities && hass.entities[id] && hass.entities[id].platform === "truma_inetx";
+    const lists = [
+      entities || [],
+      entitiesFallback || [],
+      Object.keys((hass && hass.states) || {}),
+    ];
+    for (const wanted of [(id) => climate(id) && ours(id), climate]) {
+      for (const list of lists) {
+        const found = list.find(wanted);
+        if (found) return { entity: found };
+      }
+    }
+    // No climate entity anywhere: still return the key, so the editor shows an
+    // entity to fill in rather than a config the card rejects outright.
+    return { entity: "" };
+  }
+
+  // The visual editor. Without a getConfigElement OR a getConfigForm, Home
+  // Assistant has nothing to render and the card edit dialog says "Visual
+  // configuration is not available", leaving only YAML.
+  //
+  // A schema is the cheap half of that deal: Home Assistant renders it itself
+  // (hui-form-editor -> ha-form), and the labels come from its own
+  // translations -- "entity" and "name" are both in
+  // ui.panel.lovelace.editor.card.generic -- so this ships no editor element
+  // and no strings of its own.
+  static getConfigForm() {
+    return {
+      schema: [
+        {
+          name: "entity",
+          required: true,
+          selector: { entity: { domain: "climate" } },
+        },
+        { name: "name", selector: { text: {} } },
+      ],
+    };
+  }
+
   setConfig(config) {
     if (!config || !config.entity) throw new Error("A climate entity is required");
     if (!config.entity.startsWith("climate.")) {
@@ -434,8 +484,9 @@ class TrumaClimateDialCard extends HTMLElement {
   }
 }
 
-// Wrap any existing control without replacing its DOM on state updates. The
-// coordinator, not a UI timer or a service-call promise, owns the busy state.
+// Umschließt ein vorhandenes Bedienelement, ohne dessen DOM bei State-Updates
+// neu zu bauen. Den Busy-Zustand besitzt der Coordinator -- nicht ein Timer in
+// der Oberfläche und nicht das Promise eines Service-Aufrufs.
 class TrumaOperationCard extends HTMLElement {
   constructor() {
     super();
@@ -449,6 +500,9 @@ class TrumaOperationCard extends HTMLElement {
     }
     this._config = config;
     this._child = null;
+    this._buildError = null;
+    // Eine zweite setConfig überholt die erste: die Kindkarte der alten
+    // Konfiguration darf nicht nachträglich in den neuen Rahmen rutschen.
     const generation = ++this._generation;
     this.shadowRoot.innerHTML = `<style>
       :host { display: block; }
@@ -477,7 +531,6 @@ class TrumaOperationCard extends HTMLElement {
         this._renderFeedback();
       });
     }
-    this._buildError = null;
     this._renderFeedback();
   }
 
@@ -493,7 +546,8 @@ class TrumaOperationCard extends HTMLElement {
     const de = (this._hass?.language || "en").startsWith("de");
     const state = this._hass?.states[this._config.operation_entity];
     if (!state || ["unknown", "unavailable"].includes(state.state)) {
-      return { busy: false, error: false, text: de ? "Vorgangsstatus nicht verfügbar" : "Operation status unavailable" };
+      return { busy: false, error: false,
+        text: de ? "Vorgangsstatus nicht verfügbar" : "Operation status unavailable" };
     }
     const filter = this._config.action;
     const matches = !filter || (Array.isArray(filter)
@@ -512,12 +566,24 @@ class TrumaOperationCard extends HTMLElement {
   _renderFeedback() {
     if (!this._config || !this._status) return;
     const feedback = this._feedback();
-    this._control.classList.toggle("busy", Boolean(this._config.card) && feedback.busy && !this._buildError);
+    this._control.classList.toggle("busy",
+      Boolean(this._config.card) && feedback.busy && !this._buildError);
     this._control.setAttribute("aria-busy", String(feedback.busy && !this._buildError));
-    // Error messages are untrusted device/service text; never use innerHTML.
-    this._status.textContent = this._buildError || feedback.text;
+    // Fehlertexte kommen ungeprüft von Gerät und Dienst; niemals innerHTML.
+    const text = this._buildError || feedback.text;
+    // Erst einblenden, dann füllen: [hidden] ist display:none, und eine so
+    // ausgeblendete Region steht gar nicht im Accessibility-Tree. Wer dort
+    // zuerst den Text setzt, schreibt ihn in einen unsichtbaren Teilbaum --
+    // das spätere Einblenden löst dann keine Ansage mehr aus.
+    if (text && this._status.hidden) this._status.hidden = false;
+    // Home Assistant reicht jedem Lovelace-Element bei JEDER State-Änderung im
+    // System ein neues hass-Objekt durch, mehrfach pro Sekunde. Nur schreiben,
+    // wenn sich der Text wirklich geändert hat: jede Zuweisung ist eine
+    // DOM-Mutation in einer role="status"-Region, und Screenreader entdoppeln
+    // identische Wiederholungen nicht.
+    if (this._status.textContent !== text) this._status.textContent = text;
     this._status.classList.toggle("error", Boolean(this._buildError || feedback.error));
-    this._status.hidden = !this._status.textContent;
+    if (!text && !this._status.hidden) this._status.hidden = true;
   }
 }
 
@@ -561,11 +627,20 @@ customElements.whenDefined("home-assistant").then(() => {
 });
 
 window.customCards = window.customCards || [];
-window.customCards.push({ type: "truma-operation-card", name: "Truma operation feedback",
-  description: "Live operation status and accessible busy feedback around a control." });
+window.customCards.push({
+  type: "truma-operation-card",
+  name: "Truma operation feedback",
+  description:
+    "Live operation status and accessible busy feedback around a control.",
+});
 window.customCards.push({
   type: "truma-climate-dial-card",
   name: "Truma climate dial",
   description:
     "Thermostat dial that sets the temperature while heating and the fan speed while venting.",
+  // Render a live card in the picker instead of the description. Safe: the
+  // picker catches a card that refuses its stub config and falls back to the
+  // description, which is what a vehicle with no climate entity gets.
+  preview: true,
+  documentationURL: "https://github.com/rpodgorny/hass-truma-inetx#dashboard-card",
 });

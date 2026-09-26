@@ -8,11 +8,13 @@ from homeassistant.components import bluetooth
 from homeassistant.components.frontend import add_extra_js_url
 from homeassistant.components.http import StaticPathConfig
 from homeassistant.const import CONF_ADDRESS, EVENT_HOMEASSISTANT_STOP, Platform
-from homeassistant.core import Event, HomeAssistant
+from homeassistant.core import Event, HomeAssistant, callback
+from homeassistant.helpers import device_registry as dr
 from homeassistant.loader import async_get_integration
 
 from .const import DOMAIN, LOGGER
 from .coordinator import TrumaConfigEntry, TrumaCoordinator
+from .truma.const import DEV_PANEL
 
 PLATFORMS: list[Platform] = [
     Platform.CLIMATE,
@@ -67,6 +69,23 @@ async def _async_register_card(hass: HomeAssistant) -> None:
     add_extra_js_url(hass, f"{CARD_URL}?v={integration.version}")
 
 
+async def _async_update_listener(hass: HomeAssistant, entry: TrumaConfigEntry) -> None:
+    """Optionen neu einlesen, indem der Eintrag neu geladen wird.
+
+    Der Coordinator liest ``poll_interval`` nur beim Betreten seiner
+    Session-Schleife. Ohne diesen Reload bliebe eine Umstellung zwischen
+    Dauerverbindung und Poll-Betrieb wirkungslos, bis die Verbindung von
+    selbst abreißt — im Dauerbetrieb also womöglich tagelang.
+    """
+    await hass.config_entries.async_reload(entry.entry_id)
+
+
+@callback
+def _async_register_update_listener(entry: TrumaConfigEntry) -> None:
+    """Den Listener anmelden und fürs Entladen vormerken."""
+    entry.async_on_unload(entry.add_update_listener(_async_update_listener))
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: TrumaConfigEntry) -> bool:
     """Set up Truma iNet X from a config entry."""
     await _async_register_card(hass)
@@ -92,6 +111,44 @@ async def async_setup_entry(hass: HomeAssistant, entry: TrumaConfigEntry) -> boo
     await coordinator.async_config_entry_first_refresh()
     await coordinator.async_start()
     entry.runtime_data = coordinator
+    _async_register_update_listener(entry)
+
+    # Everything past this point runs with a live session behind it, and Home
+    # Assistant does not call async_unload_entry for an entry whose setup
+    # raised -- so a failure here would leave the session running, holding one
+    # of the panel's ~4 connection slots, referenced by nothing. Stop it on the
+    # way out and let the failure through unchanged.
+    try:
+        await _async_finish_setup(hass, entry, coordinator, address)
+    except Exception:
+        await coordinator.async_stop()
+        raise
+    return True
+
+
+async def _async_finish_setup(
+    hass: HomeAssistant,
+    entry: TrumaConfigEntry,
+    coordinator: TrumaCoordinator,
+    address: str,
+) -> None:
+    """Register the hub, arm the shutdown hook and forward the platforms."""
+    # Register the panel up front rather than letting the first entity create
+    # it. The panel is the hub every other bus device hangs off, and a
+    # via_device pointing at a device that does not exist yet is dropped
+    # silently -- so a gas sensor that answers before the panel does would end
+    # up at the top level, permanently. It also means a bus that has not
+    # spoken yet is still visible as a device, which is the difference between
+    # "nothing has answered" and "the integration did nothing".
+    hub = dr.async_get(hass).async_get_or_create(
+        config_entry_id=entry.entry_id,
+        **coordinator.device_info(DEV_PANEL),
+    )
+    # And hand back the registry's own id for it, which is what a bus device
+    # hangs off on a Home Assistant new enough to want one. It is knowable
+    # only here, after the panel is registered and before any platform is
+    # forwarded, which is exactly the window this call sits in.
+    coordinator.hub_device_id = hub.id
 
     async def _async_stop(_event: Event) -> None:
         """Close the BLE link before Home Assistant exits."""
@@ -115,12 +172,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: TrumaConfigEntry) -> boo
     )
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
-    return True
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: TrumaConfigEntry) -> bool:
-    """Unload a config entry."""
+    """Unload a config entry, stopping the session whatever the platforms do.
+
+    The session is stopped even when a platform refuses to unload. A refusal
+    already costs the user the reload -- Home Assistant does not set the entry
+    up again after a failed unload -- and leaving a live BLE session attached
+    to an entry nobody is reading makes it worse: it holds one of the panel's
+    ~4 connection slots, so the entry that does not come back cannot be
+    reloaded by hand either until Home Assistant is restarted.
+    """
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
-    if unload_ok:
-        await entry.runtime_data.async_stop()
+    await entry.runtime_data.async_stop()
     return unload_ok

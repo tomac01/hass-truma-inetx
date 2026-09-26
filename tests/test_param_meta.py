@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Offline checks for keeping the panel's own description of a parameter.
 
-No hardware, no Home Assistant install: the HA/bleak imports are stubbed so the
-real ``coordinator._on_frame`` runs, and the frames it is fed are built and
-parsed with the real ``truma.protocol``.
+No hardware, no Home Assistant install: the HA imports are stubbed so the real
+``coordinator._on_frame`` runs, and the frames it is fed are built and parsed
+with the real ``truma.protocol``.
 
 Why this exists (issue #15, reported on a Combi 6 E + iNet X Pro):
 ``System.FlameStatus`` takes 0, 1 and 2 there, and the integration models it as
@@ -23,85 +23,36 @@ What it pins:
 4. a later frame that describes less does not erase what is already known,
 5. a parameter with no value is still described -- being unavailable is
    exactly the interesting case,
-6. the values themselves still land where they always did,
-7. and the result survives a diagnostics download, i.e. it is JSON.
+6. the values themselves still land under the device that published them,
+7. the description is filed under that device too, and is what its own
+   controls are built from,
+8. and the result survives a diagnostics download, i.e. it is JSON.
 
 Run: ``python3 tests/test_param_meta.py`` (needs ``cbor2``).
 """
 
 from __future__ import annotations
 
-import importlib.util
 import json
 import sys
 import types
 from pathlib import Path
 
-SRC = Path(__file__).resolve().parents[1] / "custom_components" / "truma_inetx"
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import stubs  # noqa: E402
 
 HEATER = 0x0201
 APP_ADDR = 0x0501
 
+stubs.install_homeassistant()
+stubs.stub_transport()
+TC = stubs.load_truma("const")
+PROTO = stubs.load_truma("protocol")
+BUS = stubs.load("bus")
+stubs.load("const")
+COORD = stubs.load("coordinator")
 
-def _mod(name: str, **attrs):
-    module = types.ModuleType(name)
-    module.__dict__.update(attrs)
-    sys.modules[name] = module
-    return module
-
-
-def _load():
-    """Import the real coordinator + truma protocol with externals stubbed."""
-    _mod("homeassistant", __path__=[])
-    _mod("homeassistant.core", HomeAssistant=object, callback=lambda f: f)
-    _mod("homeassistant.config_entries", ConfigEntry=dict)
-    _mod("homeassistant.exceptions", HomeAssistantError=RuntimeError)
-    _mod("homeassistant.helpers", __path__=[], issue_registry=types.SimpleNamespace(
-        async_create_issue=lambda *a, **kw: None,
-        async_delete_issue=lambda *a, **kw: None,
-        IssueSeverity=types.SimpleNamespace(WARNING="warning"),
-    ))
-    _mod("homeassistant.helpers.storage", Store=object)
-    _mod("bleak_retry_connector", BleakClientWithServiceCache=object,
-         establish_connection=None)
-
-    class _Coordinator:
-        """DataUpdateCoordinator stand-in that tolerates [TrumaState]."""
-
-        def __class_getitem__(cls, _item):
-            return cls
-
-    _mod("homeassistant.helpers.update_coordinator", DataUpdateCoordinator=_Coordinator)
-
-    _mod("truma_pkg", __path__=[str(SRC)])
-    _mod("truma_pkg.truma", __path__=[str(SRC / "truma")])
-    _mod("truma_pkg.ble", TrumaBleClient=object, device_from_bluez=None)
-    _mod("truma_pkg.bt", async_panel_advertising=lambda *a: False,
-         async_remote_scanner_source=lambda *a: None,
-         async_resolve_proxy_device=None, async_wait_until_heard=None)
-    _mod("truma_pkg.proxy", TrumaProxyTracker=object)
-
-    def _real(name: str, package: str = "truma_pkg", path: Path = SRC):
-        spec = importlib.util.spec_from_file_location(
-            f"{package}.{name}", path / f"{name}.py"
-        )
-        assert spec is not None and spec.loader is not None
-        module = importlib.util.module_from_spec(spec)
-        sys.modules[f"{package}.{name}"] = module
-        spec.loader.exec_module(module)
-        return module
-
-    truma_const = _real("const", "truma_pkg.truma", SRC / "truma")
-    protocol = _real("protocol", "truma_pkg.truma", SRC / "truma")
-    state = _real("state", "truma_pkg.truma", SRC / "truma")
-    _real("const")
-    coordinator = _real("coordinator")
-    return truma_const, protocol, state, coordinator
-
-
-TC, PROTO, STATE, COORD = _load()
-
-import cbor2  # noqa: E402  - after _load(), which puts the package on sys.path
+import cbor2  # noqa: E402  - after the stubs, which put the package on sys.path
 
 
 class _Coord:
@@ -110,17 +61,31 @@ class _Coord:
     hass = types.SimpleNamespace(loop=types.SimpleNamespace(time=lambda: 0.0))
     unique_id = "Truma iNetX-FFB4D1"
 
+    _client = None
+
     def __init__(self) -> None:
-        self._state = STATE.TrumaState()
-        self._state.assigned_addr = APP_ADDR
+        self._bus = BUS.Bus()
+        self._bus.assigned_addr = APP_ADDR
         self._last_frame = 0.0
         self.updates = 0
+        # Kein Rückmeldungsbuch: hier wird nichts geschrieben, und genau
+        # daran erkennt der Frame-Pfad, dass er sich die Buchführung spart.
+        self._write_feedback = {}
 
     def async_set_updated_data(self, _data) -> None:
         self.updates += 1
 
     _on_frame = COORD.TrumaCoordinator._on_frame
-    _learn_param = COORD.TrumaCoordinator._learn_param
+    # Borrowed too: _on_frame reconciles device names on every frame
+    # that changes anything, so a double without it is not the
+    # coordinator this frame path runs on.
+    device_is_named = COORD.TrumaCoordinator.device_is_named
+    async_sync_device_names = COORD.TrumaCoordinator.async_sync_device_names
+    # Und seit ein Schreibvorgang auf die Antwort des Geräts wartet: jeder
+    # Frame wird einer wartenden Bestätigung angeboten. Ohne die beiden wäre
+    # dies nicht mehr der Frame-Pfad, auf dem der Coordinator läuft.
+    _note_frame_values = COORD.TrumaCoordinator._note_frame_values
+    on_frame_value = COORD.TrumaCoordinator.on_frame_value
 
 
 def _feed(coord: _Coord, sub_type: int, payload: dict) -> None:
@@ -139,8 +104,20 @@ def _discovery(parameters: list, topic: str = "System") -> dict:
 
 # The shape of a described parameter, as the panel sends it: the value, its
 # type and permissions, its range, and an enum naming every value.
-FLAME_STATUS = {
-    "pn": "FlameStatus",
+#
+# The parameter is invented, and deliberately so. This fixture was called
+# FLAME_STATUS and carried ``pn: "FlameStatus"`` with a made-up ``type: 4``,
+# ``perm: 1`` and an Off/Gas/Electric enum -- none of which any panel has
+# published. Real hardware sends ``System.FlameStatus`` as ``{'type': 105,
+# 'perm': 0, 'avail': 1}`` with no enum at all (#23), and its three values are
+# off / running / idle, measured rather than named by the panel (#15, #24,
+# #27). A fixture wearing a real parameter's name reads as evidence about that
+# parameter, and this one contradicted the hardware in every field.
+#
+# So: a name no bus carries, and every field here is about the machinery that
+# keeps a description, not about any appliance.
+DESCRIBED_PARAM = {
+    "pn": "DescribedState",
     "v": 2,
     "type": 4,
     "perm": 1,
@@ -149,8 +126,8 @@ FLAME_STATUS = {
     "max": 2,
     "enum": [
         {"n": "Off", "a": True, "v": 0},
-        {"n": "Gas", "a": True, "v": 1},
-        {"n": "Electric", "a": True, "v": 2},
+        {"n": "Low", "a": True, "v": 1},
+        {"n": "High", "a": True, "v": 2},
     ],
 }
 
@@ -158,11 +135,11 @@ FLAME_STATUS = {
 def test_a_discovery_answer_teaches_the_names_of_a_tri_state() -> None:
     """The whole of issue #15: 0, 1 and 2 named by whoever defined them."""
     coord = _Coord()
-    _feed(coord, TC.MBP_PARAM_DISC_RESP, _discovery([FLAME_STATUS]))
+    _feed(coord, TC.MBP_PARAM_DISC_RESP, _discovery([DESCRIBED_PARAM]))
 
-    meta = coord._state.param_meta.get("System.FlameStatus")
-    assert meta is not None, "the panel described the parameter and it was dropped"
-    assert meta["enum"] == {"0": "Off", "1": "Gas", "2": "Electric"}, meta
+    meta = coord._bus.device(HEATER).meta("System", "DescribedState")
+    assert meta, "the device described the parameter and it was dropped"
+    assert meta["enum"] == {"0": "Off", "1": "Low", "2": "High"}, meta
     assert (meta["min"], meta["max"]) == (0, 2), meta
     # perm/avail say whether it can be written and whether it means anything on
     # this vehicle; both are part of the answer to "what is this".
@@ -172,20 +149,20 @@ def test_a_discovery_answer_teaches_the_names_of_a_tri_state() -> None:
 def test_the_value_still_lands_where_it_always_did() -> None:
     """Learning the description must not disturb the state it arrives with."""
     coord = _Coord()
-    _feed(coord, TC.MBP_PARAM_DISC_RESP, _discovery([FLAME_STATUS]))
+    _feed(coord, TC.MBP_PARAM_DISC_RESP, _discovery([DESCRIBED_PARAM]))
 
-    assert coord._state.flame_status == 2
-    assert coord._state.raw_params["System.FlameStatus"] == 2
+    assert coord._bus.device(HEATER).get("System", "DescribedState") == 2
     assert coord.updates == 1, "the frame did not reach the entities"
 
 
 def test_a_plain_update_describes_as_well_as_reports() -> None:
     """Info frames carry the same description; both paths have to keep it."""
     coord = _Coord()
-    _feed(coord, 0x00, {"tn": "System", **FLAME_STATUS})
+    _feed(coord, 0x00, {"tn": "System", **DESCRIBED_PARAM})
 
-    assert coord._state.flame_status == 2
-    assert coord._state.param_meta["System.FlameStatus"]["enum"]["1"] == "Gas"
+    assert coord._bus.device(HEATER).get("System", "DescribedState") == 2
+    meta = coord._bus.device(HEATER).meta("System", "DescribedState")
+    assert meta["enum"]["1"] == "Low", meta
 
 
 def test_a_value_this_vehicle_cannot_produce_is_marked() -> None:
@@ -205,7 +182,7 @@ def test_a_value_this_vehicle_cannot_produce_is_marked() -> None:
         ],
     }], topic="EnergySrc"))
 
-    meta = coord._state.param_meta["EnergySrc.DieselLevel"]
+    meta = coord._bus.device(HEATER).meta("EnergySrc", "DieselLevel")
     assert meta["enum"] == {"0": "Off", "1": "On"}, meta
     assert meta["enum_unavailable"] == ["1"], meta
 
@@ -213,12 +190,12 @@ def test_a_value_this_vehicle_cannot_produce_is_marked() -> None:
 def test_a_later_frame_that_says_less_erases_nothing() -> None:
     """Most frames are bare values. They must not undo the discovery answer."""
     coord = _Coord()
-    _feed(coord, TC.MBP_PARAM_DISC_RESP, _discovery([FLAME_STATUS]))
-    _feed(coord, 0x00, {"tn": "System", "pn": "FlameStatus", "v": 0})
+    _feed(coord, TC.MBP_PARAM_DISC_RESP, _discovery([DESCRIBED_PARAM]))
+    _feed(coord, 0x00, {"tn": "System", "pn": "DescribedState", "v": 0})
 
-    meta = coord._state.param_meta["System.FlameStatus"]
-    assert meta["enum"] == {"0": "Off", "1": "Gas", "2": "Electric"}, meta
-    assert coord._state.flame_status == 0
+    meta = coord._bus.device(HEATER).meta("System", "DescribedState")
+    assert meta["enum"] == {"0": "Off", "1": "Low", "2": "High"}, meta
+    assert coord._bus.device(HEATER).get("System", "DescribedState") == 0
 
 
 def test_a_parameter_with_no_value_is_still_described() -> None:
@@ -230,10 +207,10 @@ def test_a_parameter_with_no_value_is_still_described() -> None:
         "enum": [{"n": "Off", "a": True, "v": 0}, {"n": "On", "a": True, "v": 1}],
     }], topic="EnergySrc"))
 
-    meta = coord._state.param_meta["EnergySrc.GasLevel"]
+    meta = coord._bus.device(HEATER).meta("EnergySrc", "GasLevel")
     assert meta["avail"] == 0, meta
     assert meta["enum"] == {"0": "Off", "1": "On"}, meta
-    assert "EnergySrc.GasLevel" not in coord._state.raw_params
+    assert not coord._bus.device(HEATER).reports("EnergySrc", "GasLevel")
 
 
 def test_junk_is_ignored_rather_than_stored() -> None:
@@ -250,26 +227,62 @@ def test_junk_is_ignored_rather_than_stored() -> None:
     }]))
 
     # The range it did state is kept; nothing in that enum names a value.
-    assert coord._state.param_meta["System.Weird"] == {"max": 3}
+    assert coord._bus.device(HEATER).meta("System", "Weird") == {"max": 3}
     # A value with no description at all leaves no empty shell behind.
-    assert "System.Undescribed" not in coord._state.param_meta
+    assert not coord._bus.device(HEATER).meta("System", "Undescribed")
 
 
 def test_the_description_survives_a_diagnostics_download() -> None:
     """It exists to be read by someone who was sent a download link."""
     coord = _Coord()
-    _feed(coord, TC.MBP_PARAM_DISC_RESP, _discovery([FLAME_STATUS]))
+    _feed(coord, TC.MBP_PARAM_DISC_RESP, _discovery([DESCRIBED_PARAM]))
 
-    dumped = json.loads(json.dumps(coord._state.param_meta))
-    assert dumped["System.FlameStatus"]["enum"]["2"] == "Electric"
+    dumped = json.loads(json.dumps(coord._bus.device(HEATER).param_meta))
+    assert dumped["System.DescribedState"]["enum"]["2"] == "High"
+
+
+def test_the_description_is_what_a_control_is_built_from() -> None:
+    """Kept so that entities stop guessing, not so a download reads better.
+
+    ``number.py`` hard-coded 0-10 for the circulation fan, which is a Combi's
+    range and was handed to every device that published the parameter. A
+    device that states its own range gets its own slider.
+    """
+    coord = _Coord()
+    _feed(coord, TC.MBP_PARAM_DISC_RESP, _discovery([{
+        "pn": "FanLevel", "v": 2, "perm": 1, "min": 1, "max": 6,
+    }], topic="AirCirculation"))
+
+    device = coord._bus.device(HEATER)
+    assert device.bounds("AirCirculation", "FanLevel") == (1, 6)
+    assert device.writable("AirCirculation", "FanLevel") is True
+    bus = coord._bus
+    assert bus.validate_write(HEATER, "AirCirculation", "FanLevel", 6)[0] is True
+    ok, msg = bus.validate_write(HEATER, "AirCirculation", "FanLevel", 9)
+    assert ok is False and "1-6" in msg, msg
+
+
+def test_a_parameter_the_device_calls_read_only_refuses_a_write() -> None:
+    """``perm`` is "permission, Integer" and nothing more in the reference.
+
+    So 0 is read as a refusal on the strength of the field's name, and the
+    message quotes the claim -- which is what gets a wrong reading of the
+    field reported rather than silently losing somebody a control.
+    """
+    coord = _Coord()
+    _feed(coord, TC.MBP_PARAM_DISC_RESP, _discovery([{
+        "pn": "GasLevel", "v": 1, "perm": 0,
+    }], topic="EnergySrc"))
+
+    assert coord._bus.device(HEATER).writable("EnergySrc", "GasLevel") is False
+    ok, msg = coord._bus.validate_write(HEATER, "EnergySrc", "GasLevel", 0)
+    assert ok is False and "read-only" in msg, msg
+    # A device that said nothing about permissions is not assumed to refuse.
+    assert coord._bus.device(HEATER).writable("System", "NeverDescribed") is None
 
 
 def _main() -> None:
-    for name, fn in sorted(globals().items()):
-        if name.startswith("test_") and callable(fn):
-            fn()
-            print(f"ok  {name}")
-    print("parameter descriptions: all checks OK")
+    stubs.run_tests(globals(), "parameter descriptions")
 
 
 if __name__ == "__main__":

@@ -23,8 +23,14 @@ What it pins:
    reporter's vehicle and something else on the next one,
 4. a vehicle that has never reported a tank is never asked, because every
    vehicle subscribes to these topics whether or not it has the hardware,
-5. and the reply lands in the state field the sensor reads, so an emptied tank
-   actually moves.
+5. the reply lands in the state field the sensor reads, so an emptied tank
+   actually moves,
+6. the request is a probe, because the panel withholds the acknowledgement for
+   a frame addressed to a device that is not there and an unanswered non-probe
+   send ends the session -- at startup, and then once a minute for as long as
+   Home Assistant runs,
+7. and a publisher that never answers is asked three times and then left
+   alone, until it publishes something of its own.
 
 Run: ``python3 tests/test_measure_request.py`` (needs ``cbor2``).
 """
@@ -32,13 +38,13 @@ Run: ``python3 tests/test_measure_request.py`` (needs ``cbor2``).
 from __future__ import annotations
 
 import asyncio
-import importlib.util
 import sys
 import types
 from itertools import pairwise
 from pathlib import Path
 
-SRC = Path(__file__).resolve().parents[1] / "custom_components" / "truma_inetx"
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import stubs  # noqa: E402
 
 # The electrical block that owns the tanks on the reporting vehicle. Named
 # here only to prove that nothing in the source needs to name it -- which is
@@ -49,63 +55,14 @@ PANEL = 0x0101
 APP_ADDR = 0x0501
 
 
-def _mod(name: str, **attrs):
-    module = types.ModuleType(name)
-    module.__dict__.update(attrs)
-    sys.modules[name] = module
-    return module
-
-
-def _load():
-    """Import the real coordinator + truma protocol with externals stubbed."""
-    _mod("homeassistant", __path__=[])
-    _mod("homeassistant.core", HomeAssistant=object, callback=lambda f: f)
-    _mod("homeassistant.config_entries", ConfigEntry=dict)
-    _mod("homeassistant.exceptions", HomeAssistantError=RuntimeError)
-    _mod("homeassistant.helpers", __path__=[], issue_registry=types.SimpleNamespace(
-        async_create_issue=lambda *a, **kw: None,
-        async_delete_issue=lambda *a, **kw: None,
-        IssueSeverity=types.SimpleNamespace(WARNING="warning"),
-    ))
-    _mod("homeassistant.helpers.storage", Store=object)
-    _mod("bleak_retry_connector", BleakClientWithServiceCache=object,
-         establish_connection=None)
-
-    class _Coordinator:
-        """DataUpdateCoordinator stand-in that tolerates [TrumaState]."""
-
-        def __class_getitem__(cls, _item):
-            return cls
-
-    _mod("homeassistant.helpers.update_coordinator", DataUpdateCoordinator=_Coordinator)
-
-    _mod("truma_pkg", __path__=[str(SRC)])
-    _mod("truma_pkg.truma", __path__=[str(SRC / "truma")])
-    _mod("truma_pkg.ble", TrumaBleClient=object, device_from_bluez=None)
-    _mod("truma_pkg.bt", async_panel_advertising=lambda *a: False,
-         async_remote_scanner_source=lambda *a: None,
-         async_resolve_proxy_device=None, async_wait_until_heard=None)
-    _mod("truma_pkg.proxy", TrumaProxyTracker=object)
-
-    def _real(name: str, package: str = "truma_pkg", path: Path = SRC):
-        spec = importlib.util.spec_from_file_location(
-            f"{package}.{name}", path / f"{name}.py"
-        )
-        assert spec is not None and spec.loader is not None
-        module = importlib.util.module_from_spec(spec)
-        sys.modules[f"{package}.{name}"] = module
-        spec.loader.exec_module(module)
-        return module
-
-    truma_const = _real("const", "truma_pkg.truma", SRC / "truma")
-    protocol = _real("protocol", "truma_pkg.truma", SRC / "truma")
-    state = _real("state", "truma_pkg.truma", SRC / "truma")
-    _real("const")
-    coordinator = _real("coordinator")
-    return truma_const, protocol, state, coordinator
-
-
-TC, PROTO, STATE, COORD = _load()
+stubs.install_homeassistant()
+stubs.stub_transport()
+TC = stubs.load_truma("const")
+PROTO = stubs.load_truma("protocol")
+BUS = stubs.load("bus")
+stubs.load("const")
+SESSION = stubs.load("session")
+COORD = stubs.load("coordinator")
 
 
 class _Clock:
@@ -148,7 +105,13 @@ class _Client:
     def __init__(self, coord, clock: _Clock, answers: bool = True,
                  disconnect_at: float | None = None,
                  discovery: dict[int, list[tuple[str, str, int]]] | None = None,
+                 acks_measure: bool = True,
                  ) -> None:
+        # Whether the *transport* acknowledges a measure request at all, which
+        # is a different question from whether the device answers with a
+        # level: the panel is the peer that acknowledges, and it withholds the
+        # acknowledgement for a frame addressed to a device that is not there.
+        self._acks_measure = acks_measure
         self.assigned_addr = APP_ADDR
         self.sent: list[tuple[float, dict]] = []
         self._coord = coord
@@ -168,10 +131,21 @@ class _Client:
             self._disconnect_at is None or self._clock.now < self._disconnect_at
         )
 
-    async def send(self, frame: bytes) -> bool:
+    @property
+    def transport(self) -> str:
+        """Which adapter this link runs over; the coordinator records it."""
+        return "local"
+
+    async def send(self, frame: bytes, *, probe: bool = False) -> bool:
         parsed = PROTO.parse_v3_frame(frame)
+        # Recorded because it is the flag the real transport keys its teardown
+        # off: an unanswered send that is not a probe invalidates the stream
+        # and disconnects (ble._send_locked).
+        parsed["probe"] = probe
         self.sent.append((self._clock.now, parsed))
         cbor = parsed.get("cbor") or {}
+        if cbor.get("pn") == TC.MEASURE_REQUEST_PARAM and not self._acks_measure:
+            return False
 
         values = self._discovery.get(parsed["dest"])
         if values is not None and parsed.get("sub_type") == TC.MBP_PARAM_DISC:
@@ -206,19 +180,32 @@ class _Coord:
 
     unique_id = "Truma iNetX-FFB4D1"
     poll_interval = 0
+    _client = None
 
     def __init__(self, clock: _Clock) -> None:
         self.hass = types.SimpleNamespace(
             loop=types.SimpleNamespace(time=clock.time)
         )
-        self._state = STATE.TrumaState()
+        self._bus = BUS.Bus()
         self._last_frame = 0.0
-        self._data_revision = 0
-        self._manual_requests = {}
         self._stop = False
+        # Kein Rückmeldungsbuch: hier wird nichts geschrieben, und genau
+        # daran erkennt der Frame-Pfad, dass er sich die Buchführung spart.
+        self._write_feedback = {}
+        # A session that reaches startup records which address kind carried it;
+        # these fixtures dial nothing, so there is nothing to record.
+        self._last_kind = None
+        self._session_ok = False
         self._writes_pending = 0
+        # Live-Modus-Felder aus Task 9: _finish_startup liest sie, dieser Test
+        # geht sie nie an. Ruhezustand, damit die Poll-Schleife sich normal verhaelt.
+        self._manual_hold_request_minutes = None
+        self._manual_wake_pending = False
+        self._manual_release_requested = False
+        self._manual_hold_until = 0.0
+        self._manual_requests = {}
+        self._command_hold_until = 0.0
         self._connected_event = asyncio.Event()
-        self._write_ready_event = asyncio.Event()
         self._identity = {
             "muid": "MUID", "uuid": "uuid", "username": "Home Assistant",
         }
@@ -228,34 +215,40 @@ class _Coord:
 
     async def _run_startup(self, _client) -> None:
         """Stand in for registration + discovery, which have their own file."""
-        self._on_frame({
-            "src": 0x0201, "control_raw": 0x03, "sub_type": 0x00,
-            "cbor": {"tn": "RoomClimate", "pn": "Mode", "v": 0},
-        })
 
     _request_measurements = COORD.TrumaCoordinator._request_measurements
+    manual_session_active = COORD.TrumaCoordinator.manual_session_active
     _finish_startup = COORD.TrumaCoordinator._finish_startup
     _on_frame = COORD.TrumaCoordinator._on_frame
-    # _on_frame keeps whatever the panel says a parameter is, beside its
-    # value; nothing here reads it, but the frames still travel through it.
-    _learn_param = COORD.TrumaCoordinator._learn_param
+    # Borrowed too: _on_frame reconciles device names on every frame
+    # that changes anything, so a double without it is not the
+    # coordinator this frame path runs on.
+    device_is_named = COORD.TrumaCoordinator.device_is_named
+    async_sync_device_names = COORD.TrumaCoordinator.async_sync_device_names
+    # Und seit ein Schreibvorgang auf die Antwort des Geräts wartet: jeder
+    # Frame wird einer wartenden Bestätigung angeboten. Ohne die beiden wäre
+    # dies nicht mehr der Frame-Pfad, auf dem der Coordinator läuft.
+    _note_frame_values = COORD.TrumaCoordinator._note_frame_values
+    on_frame_value = COORD.TrumaCoordinator.on_frame_value
 
 
 class _StartupCoord(_Coord):
     """As above, but running the real startup sequence end to end."""
 
     _run_startup = COORD.TrumaCoordinator._run_startup
-    _discover_params = COORD.TrumaCoordinator._discover_params
 
 
 def _run(coro, clock: _Clock):
     """Run a coroutine with sleeps that advance the virtual clock."""
-    real = getattr(COORD, "asyncio")
-    setattr(COORD, "asyncio", _FastForward(clock))
+    shim = _FastForward(clock)
+    real = {mod: getattr(mod, "asyncio") for mod in (COORD, SESSION)}
+    for mod in real:
+        setattr(mod, "asyncio", shim)
     try:
         asyncio.run(coro)
     finally:
-        setattr(COORD, "asyncio", real)
+        for mod, value in real.items():
+            setattr(mod, "asyncio", value)
 
 
 def _requests(client: _Client) -> list[tuple[float, int, str]]:
@@ -275,8 +268,8 @@ def _requests(client: _Client) -> list[tuple[float, int, str]]:
 
 def _seen_tanks(coord: _Coord, src: int = BOARD, level: int = 25) -> None:
     """Report a level for both tanks, as parameter discovery would."""
-    coord._state.update("FreshWater", "Level", level, src)
-    coord._state.update("GreyWater", "Level", level, src)
+    coord._bus.update("FreshWater", "Level", level, src)
+    coord._bus.update("GreyWater", "Level", level, src)
 
 
 def test_both_tanks_are_asked_and_addressed_to_their_owner() -> None:
@@ -301,21 +294,46 @@ def test_both_tanks_are_asked_and_addressed_to_their_owner() -> None:
             )
 
 
-def test_a_topic_falls_back_to_the_panel_when_nobody_owns_it() -> None:
-    """The broker is not a device, so it must not become a destination."""
+def test_a_level_nobody_claims_is_asked_of_nobody() -> None:
+    """The broker is not a device, so it cannot become a destination.
+
+    This used to fall back to the panel, on the grounds that the level itself
+    proved the hardware existed. It does not prove *where* it is, and the
+    panel is no more the owner of a tank than the heater was the owner of the
+    roof air conditioner it was being sent cooling commands (#10). Every real
+    frame carries a source address; a value that carries none is parked where
+    a diagnostics download shows it and nothing acts on it.
+    """
     clock = _Clock()
     coord = _Coord(clock)
     client = _Client(coord, clock)
-    # A level relayed with no usable source: the level is proof the hardware
-    # exists, but nothing has claimed the topic.
     _seen_tanks(coord, src=TC.DEV_MSG_BROKER)
 
     _run(coord._request_measurements(client), clock)
 
-    asked = _requests(client)
-    assert len(asked) == 2, "a reported tank must still be asked"
-    for _when, dest, topic in asked:
-        assert dest == PANEL, f"{topic} asked at 0x{dest:04X}, not the panel"
+    assert _requests(client) == [], "asked an address nothing is behind"
+    assert "FreshWater.Level" in coord._bus.unattributed
+
+
+def test_two_sensors_are_both_asked_rather_than_whoever_spoke_last() -> None:
+    """A bus can carry two of anything, and the panel numbers them apart.
+
+    The destination used to be "whichever device reported the topic last", so
+    on a vehicle with two tank sensors one of them was never asked and its
+    reading stayed as old as the last time somebody opened the panel's water
+    screen.
+    """
+    clock = _Clock()
+    coord = _Coord(clock)
+    client = _Client(coord, clock)
+    coord._bus.update("FreshWater", "Level", 25, BOARD)
+    coord._bus.update("FreshWater", "Level", 75, RENUMBERED)
+
+    _run(coord._request_measurements(client), clock)
+
+    asked = {dest for _when, dest, topic in _requests(client)
+             if topic == "FreshWater"}
+    assert asked == {BOARD, RENUMBERED}, asked
 
 
 def test_a_vehicle_with_no_tanks_is_never_asked() -> None:
@@ -353,7 +371,7 @@ def test_an_emptied_tank_actually_moves() -> None:
     coord = _Coord(clock)
     client = _Client(coord, clock, disconnect_at=70.0)
     _seen_tanks(coord)
-    assert coord._state.grey_water_level == 25
+    assert coord._bus.device(BOARD).get("GreyWater", "Level") == 25
 
     # The tank is emptied by hand. Nothing tells the sensor; it still holds
     # the measurement it took when the panel last asked.
@@ -361,7 +379,7 @@ def test_an_emptied_tank_actually_moves() -> None:
 
     _run(coord._finish_startup(client), clock)
 
-    assert coord._state.grey_water_level == 0, (
+    assert coord._bus.device(BOARD).get("GreyWater", "Level") == 0, (
         "the tank was emptied and the sensor never noticed"
     )
 
@@ -423,6 +441,83 @@ def test_poll_mode_asks_once_per_poll_and_does_not_hold_the_link() -> None:
     assert clock.now < 60, (
         f"poll held the link for {clock.now:.0f}s waiting on the interval"
     )
+
+
+def test_a_measure_request_is_sent_as_a_probe() -> None:
+    """Silence is one of the answers, so it must not end the session.
+
+    The panel is the peer that acknowledges, and it withholds the
+    acknowledgement for a frame addressed to a device that is not there --
+    which is the premise parameter discovery is built on, and why that probes
+    too. Sent without the flag, one unanswered request invalidates the
+    transport and disconnects (``ble._send_locked``): at startup, and then
+    again every ``_MEASURE_INTERVAL`` for as long as Home Assistant runs,
+    because the publisher list is everything that has ever reported a level
+    and nothing prunes it. A tank sensor removed or re-paired mid-run would
+    cost a reconnect a minute.
+    """
+    clock = _Clock()
+    coord = _Coord(clock)
+    client = _Client(coord, clock)
+    _seen_tanks(coord)
+
+    _run(coord._request_measurements(client), clock)
+
+    measures = [
+        parsed for _when, parsed in client.sent
+        if (parsed.get("cbor") or {}).get("pn") == TC.MEASURE_REQUEST_PARAM
+    ]
+    assert measures, "nothing was asked"
+    for parsed in measures:
+        assert parsed["probe"] is True, (
+            "a measure request sent without probe ends the session when the "
+            "panel withholds the acknowledgement"
+        )
+
+
+def test_a_publisher_that_never_answers_is_left_alone() -> None:
+    """Three tries a minute apart, then stop -- not forever, every minute."""
+    clock = _Clock()
+    coord = _Coord(clock)
+    client = _Client(coord, clock, acks_measure=False)
+    _seen_tanks(coord)
+
+    for _ in range(5):
+        _run(coord._request_measurements(client), clock)
+
+    per_topic: dict[str, int] = {}
+    for _when, _dest, topic in _requests(client):
+        per_topic[topic] = per_topic.get(topic, 0) + 1
+    assert per_topic == {"FreshWater": 3, "GreyWater": 3}, per_topic
+
+    misses = coord._bus.measure_misses
+    assert misses[(BOARD, "FreshWater")].count == 3, misses
+
+
+def test_a_publisher_that_speaks_again_is_asked_again() -> None:
+    """The count is about the device, not about the request.
+
+    A sensor that is slow, or that the panel was briefly not routing for,
+    comes back -- and anything it publishes is proof it is there. Left to the
+    count alone, a tank that answered again would never be asked to measure
+    again, which is issue #4 with extra steps.
+    """
+    clock = _Clock()
+    coord = _Coord(clock)
+    client = _Client(coord, clock, acks_measure=False)
+    _seen_tanks(coord)
+
+    for _ in range(4):
+        _run(coord._request_measurements(client), clock)
+    assert len(_requests(client)) == 6, "three tries per topic, then silence"
+
+    # It publishes something of its own, the way a device that is there does.
+    coord._bus.update("FreshWater", "Level", 30, BOARD)
+    client._acks_measure = True
+    _run(coord._request_measurements(client), clock)
+
+    assert len(_requests(client)) == 8, "a device that spoke was not asked again"
+    assert (BOARD, "FreshWater") not in coord._bus.measure_misses
 
 
 def _main() -> None:

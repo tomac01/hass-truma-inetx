@@ -22,6 +22,15 @@ Zeitüberschreitung oder einem anderen Übertragungsfehler wird die Sitzung dahe
 ungültig und getrennt, bevor ein weiterer Befehl gesendet werden kann.
 Eine verspätete Bestätigung kann so nicht den folgenden Transfer bestätigen.
 
+Eine Ausnahme kennt `send()`: `probe=True`. Damit sagt der Aufrufer, dass er
+etwas anspricht, das es vielleicht gar nicht gibt, und Schweigen eine der
+erwarteten Antworten ist — die Sitzung bleibt dann bestehen. Nur die
+Parameter-Suche hat diese Form: Sie klopft eine Reihe von Busadressen ab, von
+denen die meisten an einem Fahrzeug leer sind, und jede leere Adresse würde
+sonst die Verbindung abreißen lassen. Ihr Rückgabewert entscheidet nichts
+außer einem Debug-Zähler, und am Ende des Durchlaufs stehen 3 s, in denen
+verspätete Antworten verworfen werden.
+
 Regressionstests: `python3 tests/test_transport_ack_order.py`.
 
 ## English
@@ -43,5 +52,13 @@ Ready and DataAck do not identify a particular transfer. Cancellation, timeout
 or another transfer failure therefore invalidates and disconnects the session
 before another packet can be sent. A delayed acknowledgement cannot complete
 the following transfer.
+
+`send()` has one exception, `probe=True`: the caller is addressing something
+that may not be there and silence is one of the answers it expects, so the
+session is left alone. Only parameter discovery has that shape -- it sweeps a
+seed of bus addresses, most of them empty on any given vehicle, and each empty
+one would otherwise drop the link. Its return value decides nothing beyond a
+debug counter, and the sweep ends with a 3 s settle for late replies to be
+discarded in.
 
 Regression tests: `python3 tests/test_transport_ack_order.py`.

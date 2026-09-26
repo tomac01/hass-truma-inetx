@@ -1,14 +1,28 @@
 {
   "entity": {
     "binary_sensor": {
-      "proxy_connection": {
-        "default": "mdi:bluetooth-transfer"
-      },
-      "flame": {
-        "default": "mdi:fire"
+      "demo_mode": {
+        "default": "mdi:store-outline"
       },
       "gas": {
         "default": "mdi:gas-cylinder"
+      },
+      "needs_energy": {
+        "default": "mdi:lightning-bolt-outline"
+      },
+      "proxy_connection": {
+        "default": "mdi:bluetooth-transfer"
+      }
+    },
+    "button": {
+      "error_reset": {
+        "default": "mdi:restart-alert"
+      },
+      "manual_stop": {
+        "default": "mdi:bluetooth-off"
+      },
+      "manual_sync": {
+        "default": "mdi:bluetooth-connect"
       }
     },
     "number": {
@@ -17,22 +31,85 @@
       },
       "manual_live_minutes": {
         "default": "mdi:timer-cog-outline"
-      }
-    },
-    "button": {
-      "manual_sync": {
-        "default": "mdi:bluetooth-connect"
       },
-      "manual_stop": {
-        "default": "mdi:bluetooth-off"
+      "panel_brightness": {
+        "default": "mdi:brightness-6"
+      },
+      "panel_display_timeout": {
+        "default": "mdi:monitor-off"
+      },
+      "panel_night_brightness": {
+        "default": "mdi:brightness-4"
       }
     },
     "select": {
+      "cooling_mode": {
+        "default": "mdi:snowflake"
+      },
       "energy_source": {
         "default": "mdi:engine"
+      }
+    },
+    "sensor": {
+      "ble_conn_state": {
+        "default": "mdi:bluetooth"
       },
-      "electric_level": {
-        "default": "mdi:flash"
+      "ble_free_slots": {
+        "default": "mdi:bluetooth-connect"
+      },
+      "ble_mgmt_state": {
+        "default": "mdi:bluetooth-settings"
+      },
+      "climate_state": {
+        "default": "mdi:home-thermometer-outline"
+      },
+      "cooling_status": {
+        "default": "mdi:snowflake"
+      },
+      "error_code": {
+        "default": "mdi:alert-circle-outline"
+      },
+      "fault_reset_window": {
+        "default": "mdi:timer-sand"
+      },
+      "fresh_water_level": {
+        "default": "mdi:water"
+      },
+      "gas_bottle_level": {
+        "default": "mdi:gas-cylinder"
+      },
+      "gas_bottle_rem_time": {
+        "default": "mdi:gas-cylinder"
+      },
+      "grey_water_level": {
+        "default": "mdi:water-opacity"
+      },
+      "heating_status": {
+        "default": "mdi:radiator"
+      },
+      "logic_supply": {
+        "default": "mdi:flash-outline"
+      },
+      "operation": {
+        "default": "mdi:progress-clock"
+      },
+      "panel_clock": {
+        "default": "mdi:clock-outline"
+      },
+      "panel_idle": {
+        "default": "mdi:gesture-tap"
+      },
+      "power_mode": {
+        "default": "mdi:power-settings"
+      },
+      "temperature_source": {
+        "default": "mdi:thermometer-lines"
+      },
+      "timer_schedule": {
+        "default": "mdi:calendar-clock"
+      },
+      "timers_enabled": {
+        "default": "mdi:timer-check-outline"
       }
     },
     "switch": {
@@ -42,22 +119,20 @@
       "faster_water_heating": {
         "default": "mdi:water-boiler"
       },
+      "panel_screensaver": {
+        "default": "mdi:monitor-star"
+      },
+      "timer": {
+        "default": "mdi:timer-outline"
+      },
+      "water_autofill": {
+        "default": "mdi:water-plus"
+      },
       "water_boost": {
         "default": "mdi:water-thermometer"
       },
       "water_pump": {
         "default": "mdi:water-pump"
-      }
-    },
-    "sensor": {
-      "flame_status": {
-        "default": "mdi:fire"
-      },
-      "fresh_water_level": {
-        "default": "mdi:water"
-      },
-      "grey_water_level": {
-        "default": "mdi:water-opacity"
       }
     }
   }
