@@ -85,6 +85,8 @@ GUARDED = (
     "test_pairing_rotation.py",
     "test_pairing_local_fallback.py",
     "test_bus_dump_tool.py",
+    "test_config_flow_options.py",
+    "test_bus_range_edges.py",
 )
 
 # Bytes, die als Platzhalter durchgehen: doppelte Ziffern und doppelte
