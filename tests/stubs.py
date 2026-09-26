@@ -20,6 +20,7 @@ runs while single modules are loaded out of it.
 from __future__ import annotations
 
 import enum
+import importlib.machinery
 import importlib.util
 import sys
 import types
@@ -323,33 +324,46 @@ def install_homeassistant() -> None:
     mod("truma_pkg.truma", __path__=[str(SRC / "truma")])
 
 
+class _AlwaysFresh(importlib.machinery.SourceFileLoader):
+    """Den .pyc-Cache umgehen: immer den Quelltext von der Platte übersetzen.
+
+    ``SourceFileLoader`` hält einen Cache-Eintrag für gültig, solange mtime
+    (auf ganze Sekunden gerundet) und Byte-Größe der Quelle unverändert sind.
+    Eine Mutation macht genau so eine Änderung -- ``1`` gegen ``2`` tauschen,
+    innerhalb derselben Sekunde -- und läuft dann nie. Am 2026-09-26 gemessen:
+    drei echte Mutationen in ``select.py`` galten als überlebt, weil der alte
+    Bytecode lief, und ein Test, der die Mutation nicht sieht, beweist nichts.
+    Das kostet eine Neuübersetzung pro Laden und hält Mutationstests ehrlich.
+
+    Als Unterklasse, nicht als überschriebenes Attribut auf einer fertigen
+    Loader-Instanz: ein Schutz gegen falsch grüne Tests darf nicht davon
+    abhängen, dass der Eingriff gelungen ist, ohne es zu merken.
+    """
+
+    def get_code(self, fullname: str):
+        """Nur übersetzen -- den Cache weder lesen noch schreiben.
+
+        ``source_to_code`` statt eines eigenen ``compile``: es setzt
+        ``dont_inherit``, sonst erbte das geladene Modul die
+        ``__future__``-Schalter dieser Datei.
+        """
+        filename = self.get_filename(fullname)
+        return self.source_to_code(self.get_data(filename), filename)
+
+
 def load(name: str, package: str = "truma_pkg", path: Path = SRC) -> ModuleType:
     """Import one real module out of the integration, by file.
 
-    Always compiles from source. ``SourceFileLoader`` accepts a cached ``.pyc``
-    whenever the source's mtime (rounded to whole seconds) and byte size are
-    unchanged -- and a mutation test makes exactly that kind of edit: flip a
-    comparison, swap ``1`` for ``2``, all within the same second. Measured on
-    2026-09-26: three real mutations appeared to survive because the stale
-    bytecode ran instead. A test that cannot see the mutation proves nothing,
-    so this pays a recompile per load to keep mutation testing honest.
+    Always from source, never from bytecode -- see ``_AlwaysFresh``.
     """
+    fullname = f"{package}.{name}"
+    file = path / f"{name}.py"
     spec = importlib.util.spec_from_file_location(
-        f"{package}.{name}", path / f"{name}.py"
+        fullname, file, loader=_AlwaysFresh(fullname, str(file))
     )
     assert spec is not None and spec.loader is not None
-    loader = spec.loader
-    source_to_code = getattr(loader, "source_to_code", None)
-    get_data = getattr(loader, "get_data", None)
-    if source_to_code is not None and get_data is not None:
-        def _fresh_code(fullname: str, _loader=loader) -> object:
-            """Compile the file as it is on disk right now, cache be damned."""
-            filename = _loader.get_filename(fullname)
-            return _loader.source_to_code(_loader.get_data(filename), filename)
-
-        loader.get_code = _fresh_code
     module = importlib.util.module_from_spec(spec)
-    sys.modules[f"{package}.{name}"] = module
+    sys.modules[fullname] = module
     spec.loader.exec_module(module)
     return module
 
