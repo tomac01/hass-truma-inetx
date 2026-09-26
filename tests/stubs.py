@@ -322,13 +322,32 @@ def install_homeassistant() -> None:
         def async_write_ha_state(self) -> None:
             pass
 
+    class _ClimateEntity:
+        """Nur die Umsetzung von ``_attr_*`` auf das, was HA wirklich liest.
+
+        Dieselbe Erwägung wie bei ``unique_id`` weiter oben: ein Schieberegler
+        mit der falschen Schrittweite ist auf der Oberfläche zu sehen, also
+        soll eine Prüfung ihn so lesen können, wie die Oberfläche ihn liest,
+        und nicht das Attribut dahinter abfragen. ``ClimateEntity`` war hier
+        ein leeres ``object``, und genau diese Schrittweite blieb deshalb
+        ungeprüft.
+        """
+
+        @property
+        def target_temperature_step(self) -> float | None:
+            return getattr(self, "_attr_target_temperature_step", None)
+
+        @property
+        def temperature_unit(self):
+            return getattr(self, "_attr_temperature_unit", None)
+
     mod("homeassistant.components.number", NumberEntity=object,
         RestoreNumber=_RestoreNumber,
         NumberMode=SimpleNamespace(SLIDER="slider", BOX="box"))
     mod(
         "homeassistant.components.climate",
         FAN_OFF="off",
-        ClimateEntity=object,
+        ClimateEntity=_ClimateEntity,
         ClimateEntityFeature=ClimateEntityFeature,
         HVACAction=HVACAction,
         HVACMode=HVACMode,
