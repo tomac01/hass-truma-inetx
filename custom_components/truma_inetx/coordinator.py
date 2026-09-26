@@ -672,9 +672,19 @@ class TrumaCoordinator(DataUpdateCoordinator[Bus]):
 
         Frees the connection slot on whichever adapter or proxy carried it,
         so the next attempt starts clean.
+
+        ``_connected_event`` fällt in derselben Anweisungsfolge wie der
+        Client, und zwar **vor** dem ``await`` auf ``disconnect()``. Das Event
+        heißt „es gibt eine Sitzung, durch die geschrieben werden kann"; wer
+        es länger stehen lässt als den Client, belügt jeden, der darauf
+        wartet. Genau das war das Fenster: Der Abbau kann Sekunden dauern,
+        und ein Befehl darin wartete auf ein bereits gesetztes Event, kehrte
+        sofort zurück, fand denselben fehlenden Client und wurde mit „not
+        connected" abgewiesen -- statt auf den nächsten Poll zu warten.
         """
         client = self._client
         self._client = None
+        self._connected_event.clear()
         if client is None:
             LOGGER.debug("Truma %s: no live BLE link to close", self.unique_id)
             self._set_panel_link_connected(False)
@@ -766,8 +776,10 @@ class TrumaCoordinator(DataUpdateCoordinator[Bus]):
                 # Always tear the client down before the next attempt so a
                 # half-open link never lingers holding a connection slot (the
                 # ghost that otherwise needs a manual power-cycle).
+                # ``_disconnect_client`` löscht dabei ``_connected_event``,
+                # und zwar vor seinem eigenen ``await`` -- hier nachträglich
+                # zu löschen kam zu spät (siehe dort).
                 await self._disconnect_client()
-                self._connected_event.clear()
             if connected and self.poll_interval and not self._stop:
                 # Poll mode: the link going away is the plan, not a fault. The
                 # reading we just took is still the current state, so leave the
@@ -1429,6 +1441,15 @@ class TrumaCoordinator(DataUpdateCoordinator[Bus]):
         if not self.poll_interval:
             raise HomeAssistantError("Truma panel is not connected")
 
+        # Wir haben eben festgestellt, dass kein brauchbarer Client da ist --
+        # also darf auch das Event keinen behaupten, sonst kehrt das Warten
+        # unten sofort zurück und der Befehl scheitert nach 0 ms. Dieselbe
+        # Vorsichtsmaßnahme wie in ``_request_manual_session``, und sie deckt
+        # den Fall ab, den ``_disconnect_client`` noch nicht erreicht hat: ein
+        # Client, der bereits tot ist, aber noch hängt. Zwischen der Prüfung
+        # oben und diesem ``clear`` liegt kein ``await``, der Stand kann uns
+        # also nicht unter den Händen veralten.
+        self._connected_event.clear()
         LOGGER.debug("Truma %s: write requested; waking a poll", self.unique_id)
         self._wake_event.set()
         try:

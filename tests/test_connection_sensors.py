@@ -105,6 +105,9 @@ class _Coordinator(stubs.FakeCoordinator):
         self.pushes = 0
         # Was ``_connect_and_run`` an Sitzungsbuchhaltung anfasst.
         self._client = None
+        # ``_disconnect_client`` räumt das Event zusammen mit dem Client weg;
+        # geprüft wird es in ``test_write_connect_window``.
+        self._connected_event = asyncio.Event()
         self._initial_client = None
         self._identity = {"muid": "m", "uuid": "u", "username": "n"}
         self._avoid: set[str] = set()
