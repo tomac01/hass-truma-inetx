@@ -382,7 +382,10 @@ def _bare_loader_sites(directory: Path) -> list[str]:
     """
     watched = {"spec_from_file_location", "SourceFileLoader"}
     sites = []
-    for file in sorted(directory.glob("test_*.py")):
+    # Auch ``stubs.py`` und kuenftige Hilfsmodule, nicht nur ``test_*.py``:
+    # sonst bleibt neben den Tests eine unbewachte Ecke, in der genau das
+    # steht, was der Waechter verhindern soll.
+    for file in sorted(directory.glob("*.py")):
         text = file.read_text(encoding="utf-8")
         lines = text.splitlines()
         for node in ast.walk(ast.parse(text)):

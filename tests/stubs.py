@@ -341,6 +341,7 @@ def install_homeassistant() -> None:
     mod("truma_pkg.truma", __path__=[str(SRC / "truma")])
 
 
+# fresh-import-exempt: hier wird der frische Loader definiert.
 class AlwaysFresh(importlib.machinery.SourceFileLoader):
     """Den .pyc-Cache umgehen: immer den Quelltext von der Platte übersetzen.
 
@@ -380,6 +381,7 @@ def spec_from_source(fullname: str, file: Path | str) -> importlib.machinery.Mod
     brauchen aber denselben Loader, sonst liest ihr Import veralteten Bytecode.
     ``test_fresh_compile.py`` bewacht, dass keine Testdatei daran vorbeigeht.
     """
+    # fresh-import-exempt: hier wohnt der frische Loader, den alle nehmen.
     spec = importlib.util.spec_from_file_location(
         fullname, file, loader=AlwaysFresh(fullname, str(file))
     )
