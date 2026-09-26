@@ -41,6 +41,24 @@ SRC = Path(__file__).resolve().parents[1] / "custom_components" / "truma_inetx"
 # while the proxy still held its half of the bond.
 STALE_BOND = "Pairing failed due to error: 97"
 
+# Erfundener Name und erfundene Adressen: jedes Byte stammt aus den
+# Platzhalter-Bytes, die ``test_placeholder_addresses.py`` zulässt. Die Form
+# bleibt bedeutungstragend -- wer sie ändert, ändert, was diese Datei prüft:
+#
+# * ``IDENTITY`` endet auf den Namenssuffix von ``PANEL`` -- ihre letzten drei
+#   Bytes ohne Doppelpunkte. Nur daran erkennt ``bt.address_kind`` die
+#   Identitätsadresse. Ihr erstes Byte (0x88) trägt oben nicht das Bitmuster
+#   ``01``, ist also keine RPA, sondern liest sich als public.
+# * ``STALE`` und ``FRESH`` sind die beiden RPAs, zwischen denen das Panel
+#   rotiert -- genau der Vorgang, um den es hier geht. Die oberen zwei Bits
+#   ihres ersten Bytes sind ``01`` (0x44, 0x66), also bleiben sie RPAs. Sie
+#   dürfen NICHT auf den Namenssuffix enden, sonst gelten sie als
+#   Identitätsadresse und die Rotation prüft etwas anderes.
+PANEL = "Truma iNetX-BBCCDD"
+IDENTITY = "88:99:AA:BB:CC:DD"
+STALE = "44:55:66:77:88:99"
+FRESH = "66:77:88:99:AA:BB"
+
 
 def _load_pairing():
     """Import ``pairing.py`` with every external dependency stubbed out."""
@@ -168,7 +186,7 @@ def _run(pairing, *, bondable: set[str], addresses: list[str], stop_after: int):
     async def main():
         try:
             _bonded, client = await pairing.ensure_bonded(
-                None, "Truma iNetX-FFB4D1", "50:98:B8:FF:B4:D1"
+                None, PANEL, IDENTITY
             )
             return client
         except _StopTest:
@@ -179,7 +197,7 @@ def _run(pairing, *, bondable: set[str], addresses: list[str], stop_after: int):
 
 def main() -> None:
     pairing = _load_pairing()
-    stale, fresh = "5B:02:A3:3F:D8:7F", "5E:2F:65:64:A0:74"
+    stale, fresh = STALE, FRESH
 
     # 1+2. The proxy's stale bond makes the panel reject `stale`; rotation
     # moves to `fresh`, which the proxy holds no bond for, and that pairs.

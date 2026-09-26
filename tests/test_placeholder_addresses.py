@@ -37,14 +37,25 @@ eigenen Prüfaufwand -- eine Adresse trägt oft eine Form, die der Test braucht
 (eine RPA muss oben ``01`` stehen haben, eine Identitätsadresse muss auf den
 Namenssuffix des Panels enden), und ein blind ersetzter Wert prüft danach
 etwas anderes. Die Liste wächst deshalb Datei für Datei. Wer eine umstellt,
-trägt sie hier nach; zuletzt geschehen am 2026-09-26 für
+trägt sie hier nach; zuletzt geschehen am 2026-09-26, zunächst für
 ``test_no_route_issue.py`` und ``test_device_from_bluez.py``, in denen ein
-Review echte Adressen des Panels gefunden hatte.
+Review echte Adressen des Panels gefunden hatte, und im selben Durchgang für
+``test_pairing_transport_dispatch.py``, ``test_pairing_rotation.py``,
+``test_pairing_local_fallback.py`` und ``test_bus_dump_tool.py``. Damit stehen
+acht Dateien auf der Liste; Fundstellen in weiteren Testdateien sind offen.
 
 Was dieser Test NICHT sieht: eine Adresse, die nicht mit Doppelpunkten
 geschrieben ist. BlueZ schreibt sie in seinen D-Bus-Pfaden mit Unterstrichen
 (``dev_AA_BB_CC_DD_EE_FF``), und ein solcher Pfad fällt hier durch keine
-Prüfung -- wer einen einträgt, prüfe die Bytes selbst.
+Prüfung -- wer einen einträgt, prüfe die Bytes selbst. Wo eine Datei auf der
+Liste solche Pfade braucht, leitet sie sie darum aus der Adresskonstante ab,
+statt sie ein zweites Mal hinzuschreiben.
+
+Und umgekehrt: Eine Uhrzeit der Form ``HH:MM:SS`` ist von drei Bytepaaren
+nicht zu unterscheiden und schlägt hier an. Das ist kein Fehlalarm, den man
+wegkonfiguriert -- die Regel darf nicht aufgeweicht werden, nur weil Prosa
+bequemer wäre --, sondern eine Einschränkung an die Prosa der geprüften
+Dateien: Messprotokolle darin nennen das Datum, nicht die Sekunde.
 
 Nicht abgedeckt: alles, was keine Adresse ist. Ein Hostname, eine Seriennummer
 oder ein Schlüssel aus einem echten Aufbau fällt hier nicht auf -- ein Test,
@@ -70,6 +81,10 @@ GUARDED = (
     "test_connection_sensors.py",
     "test_no_route_issue.py",
     "test_device_from_bluez.py",
+    "test_pairing_transport_dispatch.py",
+    "test_pairing_rotation.py",
+    "test_pairing_local_fallback.py",
+    "test_bus_dump_tool.py",
 )
 
 # Bytes, die als Platzhalter durchgehen: doppelte Ziffern und doppelte

@@ -55,9 +55,32 @@ import stubs  # noqa: E402
 
 SRC = Path(__file__).resolve().parents[1] / "custom_components" / "truma_inetx"
 
-PANEL = "Truma iNetX-FFB4D1"
+PANEL = "Truma iNetX-BBCCDD"
 SERVICE_UUID = "fc310002-f3b2-11e8-8eb2-f2801f1b9fd1"
-RPA = "5E:ED:DC:5F:D5:A3"
+
+# Erfundene Adressen: jedes Byte stammt aus den Platzhalter-Bytes, die
+# ``test_placeholder_addresses.py`` zulässt. Ihre Form ist trotzdem
+# bedeutungstragend -- wer sie ändert, ändert, was diese Datei prüft:
+#
+# * ``IDENTITY`` endet auf den Namenssuffix von ``PANEL`` -- ihre letzten drei
+#   Bytes ohne Doppelpunkte. Nur daran erkennt ``bt.address_kind`` die
+#   Identitätsadresse, und ``async_resolve_device`` stuft danach ein. Ihr
+#   erstes Byte (0x88) trägt oben nicht das Bitmuster ``01``, ist also keine
+#   RPA, sondern liest sich als public.
+# * ``RPA`` (das Advert, an dem der Transport-Zweig gewählt wird) und
+#   ``RPA_ADDMODE`` (die rotierende Adresse im Add-Device-Modus) sind
+#   Resolvable Private Addresses: die oberen zwei Bits des ersten Bytes sind
+#   ``01`` (0x44, 0x66). Sie dürfen NICHT auf den Namenssuffix enden, sonst
+#   gelten sie als Identitätsadresse und die Einstufung wird am falschen
+#   Ende grün.
+# * Die ``dev_``-Formen sind abgeleitet, nicht abgeschrieben: BlueZ schreibt
+#   Adressen in seinen Objektpfaden mit Unterstrichen, und diese Schreibweise
+#   sieht der Guard nicht -- ein Tippfehler fiele dort nicht auf.
+RPA = "44:55:66:77:88:99"
+IDENTITY = "88:99:AA:BB:CC:DD"
+RPA_ADDMODE = "66:77:88:99:AA:BB"
+IDENTITY_DEV = "dev_" + IDENTITY.replace(":", "_")
+RPA_ADDMODE_DEV = "dev_" + RPA_ADDMODE.replace(":", "_")
 
 
 def _mod(name: str, **attrs):
@@ -328,9 +351,9 @@ class _V:
 def _objects() -> dict:
     """BlueZ objects: the panel bonded on hci0, absent from hci1."""
     return {
-        f"{HCI0}/dev_50_98_93_FF_B4_D1": {
+        f"{HCI0}/{IDENTITY_DEV}": {
             "org.bluez.Device1": {
-                "Address": _V("50:98:93:FF:B4:D1"),
+                "Address": _V(IDENTITY),
                 "Name": _V(PANEL),
                 "Paired": _V(True),
             }
@@ -340,9 +363,9 @@ def _objects() -> dict:
 
 def test_stale_bond_on_another_adapter_is_not_accepted() -> None:
     objs = _objects()
-    path = PAIRING._find_device(objs, name=PANEL, address="50:98:93:FF:B4:D1")
+    path = PAIRING._find_device(objs, name=PANEL, address=IDENTITY)
     # Unscoped, the search still finds the dongle's bond ...
-    assert path == f"{HCI0}/dev_50_98_93_FF_B4_D1"
+    assert path == f"{HCI0}/{IDENTITY_DEV}"
     assert PAIRING._is_paired(objs, path) is True
     # ... but without an adapter scope it must not count as bonded.
     assert PAIRING._already_bonded(objs, path=path, adapter_path=None) is False
@@ -351,7 +374,7 @@ def test_stale_bond_on_another_adapter_is_not_accepted() -> None:
 def test_bond_on_the_pairing_adapter_is_accepted() -> None:
     objs = _objects()
     path = PAIRING._find_device(
-        objs, name=PANEL, address="50:98:93:FF:B4:D1", adapter_path=HCI0
+        objs, name=PANEL, address=IDENTITY, adapter_path=HCI0
     )
     assert PAIRING._already_bonded(objs, path=path, adapter_path=HCI0) is True
 
@@ -359,7 +382,7 @@ def test_bond_on_the_pairing_adapter_is_accepted() -> None:
 def test_scoping_to_the_other_adapter_finds_no_bond() -> None:
     objs = _objects()
     path = PAIRING._find_device(
-        objs, name=PANEL, address="50:98:93:FF:B4:D1", adapter_path=HCI1
+        objs, name=PANEL, address=IDENTITY, adapter_path=HCI1
     )
     assert path is None
     assert PAIRING._already_bonded(objs, path=path, adapter_path=HCI1) is False
@@ -396,13 +419,13 @@ def _with_resolved(path: str | None):
 
 
 def test_live_path_finds_the_rpa_under_the_pairing_adapter() -> None:
-    dev_path = f"{HCI1}/dev_49_3E_CD_8E_2F_8B"
+    dev_path = f"{HCI1}/{RPA_ADDMODE_DEV}"
     assert _with_resolved(dev_path) == dev_path
 
 
 def test_live_path_rejects_a_device_on_another_adapter() -> None:
     # A route via the disabled dongle must not be paired on hci1.
-    assert _with_resolved(f"{HCI0}/dev_49_3E_CD_8E_2F_8B") is None
+    assert _with_resolved(f"{HCI0}/{RPA_ADDMODE_DEV}") is None
 
 
 def test_live_path_when_nothing_resolves() -> None:

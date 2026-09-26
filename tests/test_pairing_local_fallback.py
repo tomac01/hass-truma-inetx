@@ -54,17 +54,34 @@ import stubs  # noqa: E402
 
 SRC = Path(__file__).resolve().parents[1] / "custom_components" / "truma_inetx"
 
-PANEL = "Truma iNetX-401D00"
-# The identity address from #26 -- its last three bytes are the panel's name
-# suffix, which is what makes it the identity rather than a rotating RPA.
-IDENTITY = "84:72:93:40:1D:00"
-OTHER = "5E:2F:65:64:A0:74"
+PANEL = "Truma iNetX-BBCCDD"
 HCI0 = "/org/bluez/hci0"
-DEV = f"{HCI0}/dev_84_72_93_40_1D_00"
+
+# Erfundene Adressen: jedes Byte stammt aus den Platzhalter-Bytes, die
+# ``test_placeholder_addresses.py`` zulässt. Ihre Form ist trotzdem
+# bedeutungstragend -- wer sie ändert, ändert, was diese Datei prüft:
+#
+# * ``IDENTITY`` ist die Identitätsadresse aus #26. Ihre letzten drei Bytes
+#   ohne Doppelpunkte sind der Namenssuffix von ``PANEL``, und nur daran
+#   erkennt ``bt.address_kind`` sie als Identität statt als rotierende RPA.
+#   Ihr erstes Byte (0x88) trägt oben nicht das Bitmuster ``01``, liest sich
+#   also als public -- passend zum ``AddressType`` ``public`` an ``DEV``, von
+#   dem die Erwartung ``address_type == 1`` weiter unten hängt.
+# * ``OTHER`` ist die phantomhafte zweite Adresse neben der lebenden, ``RPA``
+#   die, auf der ein Panel im Add-Device-Modus wirbt. Beide sind Resolvable
+#   Private Addresses: die oberen zwei Bits des ersten Bytes sind ``01``
+#   (0x66, 0x44). Sie dürfen NICHT auf den Namenssuffix enden, sonst gelten
+#   sie als Identitätsadresse und die Rotation prüft etwas anderes.
+# * Die ``dev_``-Pfade sind abgeleitet, nicht abgeschrieben: BlueZ schreibt
+#   Adressen darin mit Unterstrichen, und diese Schreibweise sieht der Guard
+#   nicht -- ein Tippfehler fiele dort nicht auf.
+IDENTITY = "88:99:AA:BB:CC:DD"
+OTHER = "66:77:88:99:AA:BB"
+DEV = f"{HCI0}/dev_" + IDENTITY.replace(":", "_")
 # The RPA a panel in add-device mode advertises on, and the service UUID that
 # is all it offers to recognise it by.
-RPA = "46:01:42:5A:64:5F"
-RPA_DEV = f"{HCI0}/dev_46_01_42_5A_64_5F"
+RPA = "44:55:66:77:88:99"
+RPA_DEV = f"{HCI0}/dev_" + RPA.replace(":", "_")
 TRUMA_UUID = "fc310002-f3b2-11e8-8eb2-f2801f1b9fd1"
 
 # The wording bleak_retry_connector produced on the reporter's host, verbatim.
@@ -956,9 +973,14 @@ def test_the_link_the_bond_was_made_over_is_dropped(pairing) -> None:
     ``Device1.Pair()`` bonds over a link of its own and BlueZ keeps it, so the
     session that follows finds the panel already connected -- and the kernel
     refuses a second link to the same peer, instantly, every time. Measured on
-    the van (2026-09-18): bonded at 11:24:42, then 32 connects failed with
+    the van (2026-09-18): the bond went through, then 32 connects failed with
     ``[org.bluez.Error.Failed] Input/output error`` while that link sat idle
     for fifteen minutes. One device, one entity, disconnected.
+
+    Die Uhrzeit des Bonds stand hier einmal auf die Sekunde genau. Sie ist
+    raus, weil ``test_placeholder_addresses.py`` eine Uhrzeit der Form
+    ``HH:MM:SS`` nicht von drei Bytepaaren unterscheiden kann und sie zu Recht
+    anschlug -- das Datum verankert die Messung genauso.
     """
     bluez = _Bluez(paired=False, accepts=True)
     assert _run_bluez_bond(pairing, bluez, trust=True) is True

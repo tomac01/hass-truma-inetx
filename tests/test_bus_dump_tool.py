@@ -54,6 +54,23 @@ COMBI = 0x0201
 # The panel's own Bluetooth side, which names itself nothing.
 BLE_MGMT = 0x0601
 
+# Erfundener Name und erfundene Adresse: jedes Byte stammt aus den
+# Platzhalter-Bytes, die ``test_placeholder_addresses.py`` zulässt. Beide
+# behalten trotzdem die Form, die dieser Test braucht:
+#
+# * ``PANEL_ADDRESS`` ist die Adresse, wie sie im Config-Entry steht -- eine
+#   Resolvable Private Address, denn genau die hält Home Assistant nach einer
+#   Bluetooth-Discovery fest. Die oberen zwei Bits ihres ersten Bytes sind
+#   ``01`` (0x44), also bleibt sie eine RPA.
+# * ``PANEL_NAME`` trägt den Namenssuffix separat. Er endet NICHT in
+#   ``PANEL_ADDRESS``, und das ist Absicht: der Test unten prüft zwei
+#   unabhängige Dinge -- dass die Adresse redigiert wird und dass der Name es
+#   auch wird. Fällt der Suffix mit dem Adressende zusammen, prüft die
+#   zweite Zusicherung nichts mehr.
+PANEL_NAME = "Truma iNetX-BBCCDD"
+PANEL_ADDRESS = "44:55:66:77:88:99"
+NAME_SUFFIX = PANEL_NAME.rsplit("-", 1)[-1]
+
 stubs.install_homeassistant()
 stubs.stub_transport()
 BUS = stubs.load("bus")
@@ -91,7 +108,7 @@ def _download() -> dict:
 
     coordinator = types.SimpleNamespace(
         data=bus,
-        unique_id="Truma iNetX-FFB4D1",
+        unique_id=PANEL_NAME,
         last_update_success=True,
         address_kind="identity",
         session_transport="local",
@@ -156,10 +173,10 @@ def test_a_download_carries_no_address() -> None:
     before that was added carried the panel's address in plain text, the
     three attached to issue #22 included.
     """
-    addr = "76:32:EF:78:FD:1A"
+    addr = PANEL_ADDRESS
     coordinator = types.SimpleNamespace(
         data=BUS.Bus(),
-        unique_id="Truma iNetX-FFB4D1",
+        unique_id=PANEL_NAME,
         last_update_success=True,
         address_kind="identity",
         session_transport="local",
@@ -169,8 +186,8 @@ def test_a_download_carries_no_address() -> None:
     entry = types.SimpleNamespace(
         runtime_data=coordinator,
         as_dict=lambda: {
-            "title": "Truma iNetX-FFB4D1",
-            "data": {"address": addr, "name": "Truma iNetX-FFB4D1"},
+            "title": PANEL_NAME,
+            "data": {"address": addr, "name": PANEL_NAME},
             "discovery_keys": {
                 "bluetooth": [
                     {
@@ -188,7 +205,7 @@ def test_a_download_carries_no_address() -> None:
     )
 
     assert addr not in download, download
-    assert "FFB4D1" not in download, download
+    assert NAME_SUFFIX not in download, download
 
 
 def _main() -> None:
