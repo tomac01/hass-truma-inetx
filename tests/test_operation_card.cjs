@@ -17,7 +17,10 @@
  *   5. die Kindkarte wird genau einmal gebaut und danach nur noch mit `hass`
  *      versorgt -- kein DOM-Neubau je State-Update,
  *   6. reduced motion und role="status" stehen im Shadow-Template dieser
- *      Karte (nicht irgendwo sonst in der Datei).
+ *      Karte (nicht irgendwo sonst in der Datei),
+ *   7. die Live-Region wird nur beschrieben, wenn sich der Text wirklich
+ *      geändert hat, und sie steht sichtbar im Baum, BEVOR der Text
+ *      hineingeschrieben wird.
  *
  * Der Stub ist mit Absicht streng: `innerHTML` auf den Innenelementen wirft,
  * `window.customCards` existiert anfangs nicht, und `whenDefined` liefert ein
@@ -45,14 +48,20 @@ const ENTITY = "sensor.vorgang";
 /** Leert die Mikrotask-Queue (und damit alle .then-Ketten der Karte). */
 const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 
-/** Minimal-Element, das jeden innerHTML-Zugriff als Fehler meldet. */
+/**
+ * Minimal-Element, das jeden innerHTML-Zugriff als Fehler meldet.
+ *
+ * `textContent` und `hidden` sind bewusst Accessoren: In einer
+ * role="status"-Region ist JEDE Zuweisung eine DOM-Mutation, die ein
+ * Screenreader ansagt -- auch die mit demselben Text. `writes` schreibt
+ * deshalb jede einzelne davon in ihrer Reihenfolge mit.
+ */
 function element(name) {
   const el = {
     name,
     appended: [],
     attributes: {},
-    textContent: "",
-    hidden: false,
+    writes: [],
     classList: {
       _set: new Set(),
       toggle(cls, on) { on ? this._set.add(cls) : this._set.delete(cls); },
@@ -62,6 +71,18 @@ function element(name) {
     getAttribute(key) { return this.attributes[key]; },
     append(...nodes) { this.appended.push(...nodes); },
   };
+  let textContent = "";
+  let hidden = false;
+  Object.defineProperty(el, "textContent", {
+    enumerable: true,
+    get() { return textContent; },
+    set(value) { textContent = value; el.writes.push({ prop: "textContent", value }); },
+  });
+  Object.defineProperty(el, "hidden", {
+    enumerable: true,
+    get() { return hidden; },
+    set(value) { hidden = value; el.writes.push({ prop: "hidden", value }); },
+  });
   Object.defineProperty(el, "innerHTML", {
     get() { return undefined; },
     set(value) {
@@ -524,6 +545,106 @@ async function main() {
     "ein leerer Rahmen darf auch bei laufendem Vorgang nicht pulsieren"
   );
   helpers.impl = defaultHelpers;
+
+  // --- 10. Die Live-Region: nur schreiben, wenn nötig, und erst sichtbar ---
+
+  // Befund 6: Home Assistant reicht jedem Lovelace-Element bei JEDER
+  // State-Änderung im System ein neues hass-Objekt durch, mehrfach pro
+  // Sekunde. Ändert sich am Vorgangssensor nichts, darf die role="status"-
+  // Region kein einziges Mal beschrieben werden -- Screenreader entdoppeln
+  // identische Ansagen nicht, aus fünf Zuweisungen werden fünf "Bereit".
+  const chatty = new Card();
+  chatty.setConfig({ operation_entity: ENTITY });
+  const unrelated = (n) => ({
+    language: "de",
+    states: {
+      // Der Vorgangssensor bleibt inhaltlich gleich (neues Objekt, wie im
+      // echten hass), nur die fremde Entität wackelt.
+      [ENTITY]: { state: "idle", attributes: {} },
+      "light.flur": { state: n % 2 ? "on" : "off", attributes: {} },
+    },
+  });
+  chatty.hass = unrelated(0);
+  await tick();
+  assert.equal(chatty.shadowRoot.status.textContent, "Bereit");
+  assert.equal(chatty.shadowRoot.status.hidden, false);
+
+  chatty.shadowRoot.status.writes.length = 0;
+  for (let i = 1; i <= 5; i += 1) {
+    chatty.hass = unrelated(i);
+    await tick();
+  }
+  assert.deepEqual(
+    chatty.shadowRoot.status.writes, [],
+    "fünf hass-Zuweisungen wegen light.flur haben die Live-Region "
+    + "beschrieben -- jede davon ist eine weitere Ansage \"Bereit\": "
+    + JSON.stringify(chatty.shadowRoot.status.writes)
+  );
+
+  // Ändert sich der Text dagegen wirklich, muss er auch ankommen.
+  chatty.hass = {
+    language: "de",
+    states: { [ENTITY]: { state: "changing", attributes: { action: "x" } } },
+  };
+  await tick();
+  assert.equal(chatty.shadowRoot.status.textContent, "Wird umgestellt …");
+  assert.deepEqual(
+    chatty.shadowRoot.status.writes,
+    [{ prop: "textContent", value: "Wird umgestellt …" }],
+    "ein echter Textwechsel muss genau einmal geschrieben werden -- "
+    + JSON.stringify(chatty.shadowRoot.status.writes)
+  );
+
+  // Befund 5: Eine über [hidden] ausgeblendete Region steht wegen
+  // display:none gar nicht im Accessibility-Tree. Wird dort erst der Text
+  // gesetzt und danach eingeblendet, landet die Ansage im unsichtbaren
+  // Teilbaum und das spätere Einblenden löst keine aus. Also: erst sichtbar,
+  // dann füllen.
+  const announcing = new Card();
+  announcing.setConfig({ operation_entity: ENTITY, action: "energy_source" });
+  announcing.hass = {
+    language: "de",
+    states: { [ENTITY]: { state: "idle", attributes: {} } },
+  };
+  await tick();
+  assert.equal(
+    announcing.shadowRoot.status.hidden, true,
+    "mit Action-Filter und ohne Vorgang muss die Region ausgeblendet sein"
+  );
+
+  announcing.shadowRoot.status.writes.length = 0;
+  announcing.hass = {
+    language: "de",
+    states: {
+      [ENTITY]: { state: "changing", attributes: { action: "energy_source" } },
+    },
+  };
+  await tick();
+  const order = announcing.shadowRoot.status.writes;
+  const shown = order.findIndex(
+    (w) => w.prop === "hidden" && w.value === false
+  );
+  const filled = order.findIndex((w) => w.prop === "textContent");
+  assert.notEqual(
+    shown, -1, "die Region wurde beim Vorgangsstart nie eingeblendet"
+  );
+  assert.notEqual(filled, -1, "der Vorgangstext wurde nie geschrieben");
+  assert.ok(
+    shown < filled,
+    "der Text landete in der noch ausgeblendeten Live-Region -- sie muss "
+    + "im Baum stehen, BEVOR geschrieben wird: " + JSON.stringify(order)
+  );
+  assert.equal(announcing.shadowRoot.status.textContent, "Wird umgestellt …");
+  assert.equal(announcing.shadowRoot.status.hidden, false);
+
+  // Und zurück: leerer Text blendet wieder aus.
+  announcing.hass = {
+    language: "de",
+    states: { [ENTITY]: { state: "idle", attributes: {} } },
+  };
+  await tick();
+  assert.equal(announcing.shadowRoot.status.textContent, "");
+  assert.equal(announcing.shadowRoot.status.hidden, true);
 
   console.log("ok  operation card");
   console.log("Operation card: all checks OK");

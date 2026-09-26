@@ -570,9 +570,20 @@ class TrumaOperationCard extends HTMLElement {
       Boolean(this._config.card) && feedback.busy && !this._buildError);
     this._control.setAttribute("aria-busy", String(feedback.busy && !this._buildError));
     // Fehlertexte kommen ungeprüft von Gerät und Dienst; niemals innerHTML.
-    this._status.textContent = this._buildError || feedback.text;
+    const text = this._buildError || feedback.text;
+    // Erst einblenden, dann füllen: [hidden] ist display:none, und eine so
+    // ausgeblendete Region steht gar nicht im Accessibility-Tree. Wer dort
+    // zuerst den Text setzt, schreibt ihn in einen unsichtbaren Teilbaum --
+    // das spätere Einblenden löst dann keine Ansage mehr aus.
+    if (text && this._status.hidden) this._status.hidden = false;
+    // Home Assistant reicht jedem Lovelace-Element bei JEDER State-Änderung im
+    // System ein neues hass-Objekt durch, mehrfach pro Sekunde. Nur schreiben,
+    // wenn sich der Text wirklich geändert hat: jede Zuweisung ist eine
+    // DOM-Mutation in einer role="status"-Region, und Screenreader entdoppeln
+    // identische Wiederholungen nicht.
+    if (this._status.textContent !== text) this._status.textContent = text;
     this._status.classList.toggle("error", Boolean(this._buildError || feedback.error));
-    this._status.hidden = !this._status.textContent;
+    if (!text && !this._status.hidden) this._status.hidden = true;
   }
 }
 
