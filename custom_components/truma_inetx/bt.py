@@ -90,7 +90,7 @@ def advert_name(info: BluetoothServiceInfoBleak) -> str | None:
     that reaches us as a name whenever the object it came from is one BlueZ
     made itself. Measured on the van (2026-09-18): a bond completed while the
     panel was in add-device mode and still nameless, and the config entry it
-    produced was keyed ``4D-6B-5F-62-51-68`` -- unique_id, title and stored
+    produced was keyed ``44-55-66-77-88-99`` -- unique_id, title and stored
     name all a private address due to rotate within the quarter hour. So this
     compares addresses as addresses, not as strings.
     """
