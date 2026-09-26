@@ -327,25 +327,29 @@ def install_homeassistant() -> None:
 class _AlwaysFresh(importlib.machinery.SourceFileLoader):
     """Den .pyc-Cache umgehen: immer den Quelltext von der Platte übersetzen.
 
-    ``SourceFileLoader`` hält einen Cache-Eintrag für gültig, solange mtime
-    (auf ganze Sekunden gerundet) und Byte-Größe der Quelle unverändert sind.
-    Eine Mutation macht genau so eine Änderung -- ``1`` gegen ``2`` tauschen,
-    innerhalb derselben Sekunde -- und läuft dann nie. Am 2026-09-26 gemessen:
-    drei echte Mutationen in ``select.py`` galten als überlebt, weil der alte
+    Eine ``.pyc`` nach Zeitstempel -- Pythons Standard -- gilt als gültig,
+    solange mtime (auf ganze Sekunden gerundet) und Byte-Größe der Quelle
+    unverändert sind; erst die Hash-Variante aus PEP 552 würde die Quelle
+    wirklich vergleichen. Eine Mutation macht genau so eine Änderung -- ``1``
+    gegen ``2`` tauschen, innerhalb derselben Sekunde -- und läuft nicht,
+    solange ein solcher Eintrag daneben liegt. Am 2026-09-26 gemessen: drei
+    echte Mutationen in ``select.py`` galten als überlebt, weil der alte
     Bytecode lief, und ein Test, der die Mutation nicht sieht, beweist nichts.
     Das kostet eine Neuübersetzung pro Laden und hält Mutationstests ehrlich.
 
-    Als Unterklasse, nicht als überschriebenes Attribut auf einer fertigen
-    Loader-Instanz: ein Schutz gegen falsch grüne Tests darf nicht davon
-    abhängen, dass der Eingriff gelungen ist, ohne es zu merken.
+    Als Unterklasse, nicht als Attribut, das jemand einer fertigen
+    Loader-Instanz überschreibt: ein Schutz gegen falsch grüne Tests darf
+    nicht davon abhängen, dass der Eingriff gelungen ist -- fiele er aus,
+    würde es niemand bemerken. ``test_fresh_compile.py`` prüft ihn deshalb.
     """
 
-    def get_code(self, fullname: str):
+    def get_code(self, fullname: str) -> types.CodeType:
         """Nur übersetzen -- den Cache weder lesen noch schreiben.
 
-        ``source_to_code`` statt eines eigenen ``compile``: es setzt
-        ``dont_inherit``, sonst erbte das geladene Modul die
-        ``__future__``-Schalter dieser Datei.
+        ``source_to_code`` statt eines eigenen ``compile``: ein ``compile``
+        hier liefe im Frame dieser Datei und erbte damit ihr ``from
+        __future__ import annotations``. ``source_to_code`` setzt
+        ``dont_inherit`` und übersetzt so, wie ein echter Import es täte.
         """
         filename = self.get_filename(fullname)
         return self.source_to_code(self.get_data(filename), filename)
