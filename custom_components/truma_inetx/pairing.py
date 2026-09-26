@@ -452,7 +452,7 @@ def _live_device_path(
 
     ``_find_device`` matches on the identity address or the local name, and in
     add-device mode the panel offers neither: it advertises a rotating RPA with
-    no name, so BlueZ knows it as e.g. ``dev_49_3E_CD_8E_2F_8B``. Scoped to the
+    no name, so BlueZ knows it as e.g. ``dev_22_33_44_55_66_77``. Scoped to the
     pairing adapter, that search finds nothing and the loop below never calls
     ``Pair()`` at all (observed on the van, 2026-08-23: agent registered, sixty
     seconds of silence, timeout).
@@ -750,8 +750,8 @@ def _load_fast_conn_params(
     adapter, same minutes, from the same btmon capture::
 
         peer                 interval        supervision timeout   outcome
-        14:9C:EF:03:68:81    7.50 ms         10000 ms              65x success
-        C4:D3:6A:8C:B5:38    7.50 ms         10000 ms              90x success
+        33:44:55:66:77:88    7.50 ms         10000 ms              65x success
+        55:66:77:88:99:AA    7.50 ms         10000 ms              90x success
         the panel            30.00-50.00 ms    420 ms              connects, dies
 
     420 ms at a 45 ms connection interval is nine connection events of budget.

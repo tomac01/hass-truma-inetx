@@ -868,7 +868,7 @@ def _main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--name",
-        help="the panel's advertised name, e.g. 'Truma iNetX-FFB4D1'; "
+        help="the panel's advertised name, e.g. 'Truma iNetX-BBCCDD'; "
              "without it the first panel that answers is used",
     )
     parser.add_argument(

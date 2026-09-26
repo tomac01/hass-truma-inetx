@@ -61,7 +61,7 @@ def _as_address(value: str) -> str:
     """``value`` as bare address hex, or ``""`` when it is not an address.
 
     Separators only -- a name is not reduced to the hex it happens to contain,
-    so "Truma iNetX-FFB4D1" stays a name. Twelve hex digits or nothing.
+    so "Truma iNetX-BBCCDD" stays a name. Twelve hex digits or nothing.
     """
     bare = value.upper()
     for sep in (":", "-", "_", " "):
@@ -219,9 +219,9 @@ async def async_known_name(address: str) -> str | None:
     any more, and re-adding the integration had nothing to key on. BlueZ had it
     the whole time, stored beside the keys::
 
-        /var/lib/bluetooth/E4:5F:01:0B:37:DD/50:98:93:FF:B4:D1/info
+        /var/lib/bluetooth/88:99:AA:BB:CC:DD/00:11:22:33:44:55/info
         [General]
-        Name=Truma iNetX-FFB4D1
+        Name=Truma iNetX-BBCCDD
 
     Home Assistant does not pass it on: advertisements reach it over an MGMT
     side channel carrying raw AD bytes, and ``local_name or device.name or
@@ -314,7 +314,7 @@ def async_panel_advertising(hass: HomeAssistant, name: str) -> bool:
 
 # The panel puts two kinds of address on air. The identity address never
 # rotates -- its last three bytes are the suffix in the panel's name, e.g.
-# ``...FFB4D1`` for "Truma iNetX-FFB4D1" -- while everything else is a
+# ``...BBCCDD`` for "Truma iNetX-BBCCDD" -- while everything else is a
 # Resolvable Private Address that changes every few minutes. Which of the two
 # a given host can actually connect on is a property of that host's kernel and
 # controller -- ``docs/connectivity.md`` has which kernel does what, and why
