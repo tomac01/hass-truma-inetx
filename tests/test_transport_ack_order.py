@@ -16,6 +16,7 @@ Run: ``python3 tests/test_transport_ack_order.py``
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import importlib.util
 from pathlib import Path
 
@@ -357,6 +358,193 @@ async def test_a_disconnect_that_never_returns_is_let_go() -> None:
     assert client._client is None
 
 
+# -- Die echten Transport-Opcodes ---------------------------------------
+#
+# Ergänzt 2026-09-26: Die Zuweisungen oben nageln nichts fest, sie setzen nur.
+# Der Lader stubbt truma.const auf lauter Nullen, also kennt das gestubbte
+# BLE-Modul die Panel-Bytes nicht von sich aus, und jeder Test hier hat sie
+# sich bisher selbst eingesetzt -- ein vertauschtes Byte in const.py wäre von
+# keinem davon zu unterscheiden gewesen. ``load_truma`` öffnet const.py frisch
+# aus der Quelle, damit Opcode und literale Panel-Antwort aus derselben Quelle
+# stammen. Die Werte sind am Fahrzeug reverse-engineert und stehen sonst
+# nirgends im Repo; ohne Panel lassen sie sich nicht neu herleiten.
+CONST = _loader.stubs.load_truma("const")
+
+_OPCODE_NAMES = (
+    "TRANSPORT_INIT",
+    "TRANSPORT_READY",
+    "TRANSPORT_ACK",
+    "TRANSPORT_MSG_ACK",
+    "TRANSPORT_CONFIRM",
+)
+
+
+@contextlib.contextmanager
+def _real_opcodes():
+    """Spielt die echten Opcodes in das gestubbte BLE-Modul und nimmt sie zurück.
+
+    Die Zuweisungen am Dateianfang bleiben für die bestehenden Tests stehen;
+    innerhalb dieses Blocks gilt stattdessen, was in const.py steht. Dreht dort
+    jemand ein Byte, passen die literalen Panel-Antworten (``READY``, ``ACK``,
+    ``b"\\x83\\x3c\\x00"``) nicht mehr zu dem, was der Kanal erwartet oder
+    schreibt -- und die Prüfungen darunter fallen um, statt weiter zu einer
+    selbst gesetzten Kopie zu passen.
+    """
+    saved = {name: getattr(BLE, name) for name in _OPCODE_NAMES}
+    for name in _OPCODE_NAMES:
+        setattr(BLE, name, getattr(CONST, name))
+    try:
+        yield
+    finally:
+        for name, value in saved.items():
+            setattr(BLE, name, value)
+
+
+def test_the_transport_opcodes_are_the_panels_own() -> None:
+    """Die fünf Steuerbytes des Kanals gegen Literale, nicht gegen sich selbst."""
+    assert CONST.TRANSPORT_INIT == 0x01, "InitDataTransfer beginnt jeden Transfer"
+    assert CONST.TRANSPORT_READY == 0x81, "Ready ist das Tor vor dem Nutzdaten-Write"
+    assert CONST.TRANSPORT_ACK == 0xF0, "DataAck entscheidet über jeden Write"
+    assert CONST.TRANSPORT_MSG_ACK == 0x83, "0x83 kündigt eine eingehende Nachricht an"
+    assert CONST.TRANSPORT_CONFIRM == 0x03, "0x03 quittiert die Ankündigung"
+
+
+async def test_no_transfer_begins_without_the_real_init_opcode() -> None:
+    """Das Panel antwortet nur auf 0x01, also beginnt nur damit ein Transfer.
+
+    Beobachtbar gemacht statt am Byte abgelesen: das Panel-Double antwortet auf
+    die Ankündigung ausschließlich, wenn deren erstes Byte literal 0x01 ist.
+    Mit einem anderen ``TRANSPORT_INIT`` läuft der Sendevorgang in den
+    Ready-Timeout, die Nutzdaten werden nie geschrieben und ``send`` meldet
+    Misserfolg -- genau der stille Totalausfall des Links.
+    """
+    client = BLE.TrumaBleClient({})
+    announced: list[bytes] = []
+    payloads: list[bytes] = []
+
+    async def write(char, data):
+        if char == "cmd":
+            announced.append(data)
+            if data[0] == 0x01:
+                client._handle_notification("cmd", READY)
+        else:
+            payloads.append(data)
+            client._handle_notification("cmd", ACK)
+
+    client._write = write
+    ready_timeout = BLE._READY_TIMEOUT
+    BLE._READY_TIMEOUT = 0.01
+    try:
+        with _real_opcodes():
+            sent = await client.send(b"payload")
+    finally:
+        BLE._READY_TIMEOUT = ready_timeout
+    assert announced, "es wurde nichts angekündigt"
+    assert announced[0] == b"\x01\x07\x00", "die Ankündigung trägt nicht 0x01"
+    assert payloads == [b"payload"], "der Transfer hat nicht begonnen"
+    assert sent, "der Transfer begann nicht mit dem Init-Byte des Panels"
+
+
+async def test_the_real_ready_opcode_opens_the_payload_gate() -> None:
+    """Nur das literale 0x8100 des Panels gibt den Nutzdaten-Write frei.
+
+    Mit einem anderen ``TRANSPORT_READY`` wartet der Kanal auf ein Byte, das
+    nie kommt: kein Nutzdaten-Write, ein voller ``_READY_TIMEOUT`` je Sendung.
+    """
+    client = BLE.TrumaBleClient({})
+    payloads: list[bytes] = []
+
+    async def write(char, data):
+        if char == "cmd":
+            # Literal, wie das Panel es schickt -- nicht BLE.TRANSPORT_READY.
+            client._handle_notification("cmd", b"\x81\x00")
+        else:
+            payloads.append(data)
+            client._handle_notification("cmd", ACK)
+
+    client._write = write
+    ready_timeout = BLE._READY_TIMEOUT
+    BLE._READY_TIMEOUT = 0.01
+    try:
+        with _real_opcodes():
+            sent = await client.send(b"payload")
+    finally:
+        BLE._READY_TIMEOUT = ready_timeout
+    assert payloads == [b"payload"], "das echte Ready öffnete das Tor nicht"
+    assert sent
+
+
+async def test_the_real_ack_opcode_makes_a_write_succeed() -> None:
+    """0xF001 ist die Quittung; mit einem anderen Byte gilt jeder Write als gescheitert.
+
+    Und ein gescheiterter Write gibt die Sitzung auf (siehe ``_send_locked``),
+    darum wird hier auch die Verfügbarkeit des Links mitgeprüft: ein falsches
+    ``TRANSPORT_ACK`` beendet nach jedem erfolgreichen Schreibvorgang die
+    Verbindung.
+    """
+    client = BLE.TrumaBleClient({})
+    link = _Link()
+    client._client = link
+
+    async def write(char, data):
+        if char == "cmd":
+            client._handle_notification("cmd", READY)
+        else:
+            # Literal, wie das Panel quittiert -- nicht BLE.TRANSPORT_ACK.
+            client._handle_notification("cmd", b"\xf0\x01")
+
+    client._write = write
+    ack_timeout = BLE._ACK_TIMEOUT
+    BLE._ACK_TIMEOUT = 0.01
+    try:
+        with _real_opcodes():
+            sent = await client.send(b"payload")
+    finally:
+        BLE._ACK_TIMEOUT = ack_timeout
+    assert sent, "die echte Quittung des Panels wurde nicht als Erfolg gelesen"
+    assert client.connected, "ein quittierter Write gab die Sitzung auf"
+    assert link.is_connected
+
+
+def test_the_real_msg_ack_opcode_announces_an_incoming_message() -> None:
+    """0x83 setzt die Empfangsgröße, 0x03 quittiert die Ankündigung.
+
+    Ohne erkannte Ankündigung bleibt ``_receive_size`` leer, fragmentierte
+    Antworten werden nie zusammengesetzt und es kommt kein Panel-Wert mehr an.
+    """
+    client = BLE.TrumaBleClient({})
+    replies: list[tuple[str, bytes]] = []
+    client._fire_write = lambda char, data: replies.append((char, data))
+    with _real_opcodes():
+        # Literale Ankündigung von 0x003c = 60 Bytes, wie auf dem Draht.
+        client._handle_notification("cmd", b"\x83\x3c\x00")
+    assert client._receive_size == 60, "die Ankündigung wurde nicht erkannt"
+    assert replies == [("cmd", b"\x03\x00")], "die Ankündigung wurde nicht quittiert"
+
+
+def test_a_received_message_is_acknowledged_with_the_real_ack_opcode() -> None:
+    """Die zusammengesetzte Nachricht wird mit 0xF001 quittiert.
+
+    Dieselben vier Bytes noch einmal von der Empfangsseite: die Ankündigung
+    (0x83) mit ihrer Antwort (0x03) und die Quittung der fertigen Nachricht
+    (0xF0). Aufgezeichnet wird, was der Kanal wirklich schreibt.
+    """
+    client = BLE.TrumaBleClient({})
+    replies: list[tuple[str, bytes]] = []
+    message = bytes(range(60))
+    client._fire_write = lambda char, data: replies.append((char, data))
+    original = BLE.parse_v3_frame
+    BLE.parse_v3_frame = lambda data: {"raw": data}
+    try:
+        with _real_opcodes():
+            client._handle_notification("cmd", b"\x83\x3c\x00")
+            client._handle_notification("receive", message[:30])
+            client._handle_notification("receive", message[30:])
+    finally:
+        BLE.parse_v3_frame = original
+    assert replies == [("cmd", b"\x03\x00"), ("cmd", b"\xf0\x01")]
+
+
 if __name__ == "__main__":
     asyncio.run(test_late_ready_does_not_hide_the_ack())
     asyncio.run(test_no_payload_without_ready())
@@ -369,6 +557,12 @@ if __name__ == "__main__":
     asyncio.run(test_an_unanswered_probe_leaves_the_session_alone())
     asyncio.run(test_a_write_that_is_never_answered_gives_the_session_up())
     asyncio.run(test_a_disconnect_that_never_returns_is_let_go())
+    test_the_transport_opcodes_are_the_panels_own()
+    asyncio.run(test_no_transfer_begins_without_the_real_init_opcode())
+    asyncio.run(test_the_real_ready_opcode_opens_the_payload_gate())
+    asyncio.run(test_the_real_ack_opcode_makes_a_write_succeed())
+    test_the_real_msg_ack_opcode_announces_an_incoming_message()
+    test_a_received_message_is_acknowledged_with_the_real_ack_opcode()
     for _failure in (
         "ready_timeout",
         "ack_timeout",
