@@ -225,8 +225,15 @@ class _AuthFailed(Exception):
         return "[org.bluez.Error.AuthenticationFailed] Authentication Failed"
 
 
-class _InProgress(Exception):
-    """What BlueZ answers Pair() with while a pairing it took is still running."""
+class _Busy(Exception):
+    """What BlueZ answers Pair() with while a pairing it took is still running.
+
+    Deliberately *not* named after the error: the module recognises this case by
+    the message BlueZ sends, and a fixture whose class name carries the same
+    word cannot tell "the message arrived" from "the message was lost and the
+    class name stood in for it" -- ``_is_in_progress("_Busy")`` is true.
+    A whole failure mode hid behind that name.
+    """
 
     def __str__(self) -> str:
         return "[org.bluez.Error.InProgress] In Progress"
@@ -326,17 +333,17 @@ class _Bluez:
             # One pairing per adapter: the object the daemon is carrying a call
             # for is the only one that can make progress, and every other one
             # is answered InProgress however reachable it is.
-            raise _InProgress
+            raise _Busy
         if self.pairs_after is not None and not self.paired:
             # The daemon took the first call and is still working on it.
-            raise _InProgress
+            raise _Busy
         if self.paired:
             # BlueZ will not pair a device it already has a key for, which is
             # exactly the state a panel that forgot its half leaves behind.
             raise _AlreadyExists
         if path == self.hangs_on:
             self.pending_on = path
-            raise _InProgress
+            raise _Busy
         if not self.accepts:
             raise _AuthFailed
         self.paired = True
@@ -1020,6 +1027,293 @@ def test_nothing_is_disconnected_when_no_link_is_up(pairing) -> None:
     assert _run_bluez_bond(pairing, bluez, trust=True) is True
     assert "disconnect" not in bluez.calls, (
         f"disconnected a link nobody had: {bluez.calls}"
+    )
+
+
+# --- part three: what counts as the panel, and what does not -----------------
+#
+# Diese Prüfungen richten sich gegen eine Lücke, die ein Mutationstest am
+# 2026-09-26 sichtbar gemacht hat: die Attrappen oben enthalten ausschließlich
+# Objekte, die das Panel *sind*. ``GetManagedObjects`` liefert aber den ganzen
+# Baum des Adapters — jeden Kopfhörer und jede Lampe. Das Prädikat, das
+# entscheidet, ob ein Objekt das Panel ist, war gegen Fremdgeräte ungeprüft,
+# und ``Device1.Pair()`` auf dem falschen Objekt ruft an fremder Hardware an.
+
+# Ein Fremdgerät am selben Adapter. Sein Pfad sortiert absichtlich *vor* dem
+# des Panels, damit ein Gleichstand in der Rangfolge auffällt statt zufällig
+# richtig auszugehen: bei gleichem Rang entscheidet der Pfadname.
+STRANGER = "22:33:44:55:66:77"
+STRANGER_DEV = f"{HCI0}/dev_" + STRANGER.replace(":", "_")
+# Ein zweites, namenloses Fremdgerät ganz ohne UUIDs-Eintrag.
+NAMELESS = "33:44:55:66:77:88"
+NAMELESS_DEV = f"{HCI0}/dev_" + NAMELESS.replace(":", "_")
+OTHER_DEV = f"{HCI0}/dev_" + OTHER.replace(":", "_")
+
+
+def _device(address: str, **extra) -> dict:
+    """Ein ``org.bluez.Device1`` mit genau den Eigenschaften, die genannt sind.
+
+    BlueZ trägt RSSI nur, solange es das Gerät wirklich sieht; ein Objekt ohne
+    RSSI ist ein Überrest. Der Vorgabewert hier ist darum "wird gesehen".
+    """
+    dev = {"Address": _V(address), "RSSI": _V(-55)}
+    for key, value in extra.items():
+        if value is None:
+            dev.pop(key, None)
+        else:
+            dev[key] = _V(value)
+    return {"org.bluez.Device1": dev}
+
+
+def test_a_device_that_is_not_the_panel_is_never_taken_for_it(pairing) -> None:
+    """Fremde Hardware am selben Adapter darf nicht als Panel gelten.
+
+    Der Lastfall ist jeder echte Adapter: neben dem Panel hängen dort die
+    Kopfhörer und die Lampen des Nutzers. Fällt das Prädikat, liefert
+    ``_find_device`` ein Fremdgerät, und die Bond-Schleife ruft
+    ``Device1.Pair()`` darauf — das Panel wird nie gekoppelt, und ein fremdes
+    Gerät bekommt ohne Anlass eine Kopplungsanfrage.
+
+    Die Attrappen der übrigen Prüfungen enthalten nur Objekte, die das Panel
+    sind; ein Störer kommt in keiner von ihnen vor.
+    """
+    strangers = {
+        # Einer mit eigenen Diensten, einer ganz ohne UUIDs-Eintrag: ohne den
+        # zweiten bliebe ungeprüft, was ein fehlendes Feld auslöst.
+        STRANGER_DEV: _device(STRANGER, Name="Someone's Headphones",
+                              UUIDs=["0000110b-0000-1000-8000-00805f9b34fb"]),
+        NAMELESS_DEV: _device(NAMELESS),
+    }
+
+    assert pairing._find_device(
+        strangers, name=PANEL, address=IDENTITY, adapter_path=HCI0
+    ) is None, "ein fremdes Gerät wurde für das Panel genommen"
+
+    # Gegenprobe, damit die Behauptung nicht von einer Funktion erfüllt wird,
+    # die grundsätzlich nichts findet: steht das Panel daneben, wird es geliefert.
+    with_panel = dict(strangers)
+    with_panel[DEV] = _device(IDENTITY, AddressType="public", Name=PANEL)
+    assert pairing._find_device(
+        with_panel, name=PANEL, address=IDENTITY, adapter_path=HCI0
+    ) == DEV, "das Panel verlor gegen ein Fremdgerät"
+
+
+def test_the_three_ways_of_matching_are_ranked(pairing) -> None:
+    """Identitätsadresse vor Name vor Dienst-UUID — in dieser Reihenfolge.
+
+    BlueZ kann für dasselbe Panel gleichzeitig mehrere Objekte tragen: seine
+    Identität, eine früher aufgelöste RPA, die den Namen behalten hat, und die
+    lebende RPA, die im Add-Device-Modus nur noch die Dienst-UUID anbietet.
+    Fällt die Rangfolge zu einer Stufe zusammen, entscheidet der Pfadname, also
+    der Zufall — und der Bond landet auf einem Objekt, hinter dem nichts ist.
+    """
+    identity = _device(IDENTITY, AddressType="public", Name=PANEL)
+    named = _device(OTHER, AddressType="random", Name=PANEL)
+    live = _device(RPA, AddressType="random", UUIDs=[TRUMA_UUID])
+
+    both = {OTHER_DEV: named, RPA_DEV: live}
+    assert pairing._find_device(
+        {DEV: identity, **both}, name=PANEL, address=IDENTITY, adapter_path=HCI0
+    ) == DEV, "die Identitätsadresse verlor gegen einen Namens- oder UUID-Treffer"
+
+    # Ohne Identitätsobjekt gewinnt der Name vor der reinen Dienst-UUID.
+    assert pairing._find_device(
+        both, name=PANEL, address=IDENTITY, adapter_path=HCI0
+    ) == OTHER_DEV, "der Namenstreffer verlor gegen den UUID-Treffer"
+
+    # Und gesehen zu werden schlägt beides: ein Überrest ohne RSSI verliert
+    # gegen die lebende RPA, auch wenn er die Identitätsadresse trägt.
+    stale = _device(IDENTITY, AddressType="public", Name=PANEL, RSSI=None)
+    assert pairing._find_device(
+        {DEV: stale, RPA_DEV: live}, name=PANEL, address=IDENTITY,
+        adapter_path=HCI0,
+    ) == RPA_DEV, "ein Überrest schlug das Gerät, das BlueZ wirklich sieht"
+
+
+def test_an_address_the_objects_do_not_carry_comes_from_the_path(pairing) -> None:
+    """Der Rückfall auf den Pfad, und zwar als *random* gelesen.
+
+    Der Lastfall: der Resolver hat ein Objekt gefunden, das dieser Durchgang
+    von ``GetManagedObjects`` nicht trägt. Ein Panel im Add-Device-Modus wirbt
+    nur auf einer Resolvable Private Address, die random ist — als public
+    gelesen bekommt der Kernel die Verbindungsparameter am falschen Adresstyp,
+    und eine verstümmelte Adresse gar keine.
+    """
+    assert pairing._device_address({}, DEV) == (IDENTITY, True), (
+        "die Adresse aus dem Pfad war falsch oder galt als public"
+    )
+
+    # Ein Pfad, der kein Geräteobjekt benennt, liefert nichts.
+    assert pairing._device_address({}, HCI0) is None
+
+    # Gegenprobe: was BlueZ selbst sagt, schlägt den Pfad — auch im Adresstyp.
+    objects = {DEV: _device(IDENTITY, AddressType="public", Name=PANEL)}
+    assert pairing._device_address(objects, DEV) == (IDENTITY, False)
+
+
+def test_a_path_that_is_not_a_bluez_object_is_refused(pairing) -> None:
+    """Der Resolver darf keinen Pfad durchreichen, der keiner ist.
+
+    Was hier zurückkommt, wird an ``Device1.Pair()`` weitergegeben. Ein Pfad
+    außerhalb von ``/org/bluez/`` ist kein Geräteobjekt, und ein Wert, der
+    überhaupt keine Zeichenkette ist, lässt die Prüfung selbst werfen —
+    mitten in der Kopplungsschleife.
+    """
+    saved = pairing.async_resolve_device
+    try:
+        for details in ({"path": "/dev/null/dev_x"}, {"path": 42}, {}, None):
+            pairing.async_resolve_device = (
+                lambda *_a, _d=details, **_k: types.SimpleNamespace(details=_d)
+            )
+            assert pairing._live_device_path(object(), PANEL, HCI0) is None, (
+                f"ein untauglicher Pfad wurde durchgereicht: {details!r}"
+            )
+
+        # Gegenprobe: ein echter BlueZ-Pfad kommt durch.
+        pairing.async_resolve_device = lambda *_a, **_k: _BluezDevice(DEV)
+        assert pairing._live_device_path(object(), PANEL, HCI0) == DEV
+    finally:
+        pairing.async_resolve_device = saved
+
+
+def test_a_pairing_failure_is_the_message_not_the_class(pairing) -> None:
+    """Die Entscheidung "warten oder als Ablehnung lesen" hängt am Fehlertext.
+
+    ``_is_in_progress`` sucht in dem Text, den ``_try_pair`` zurückgibt. Kommt
+    dort der Klassenname der Ausnahme statt der BlueZ-Meldung an, ist bei
+    ``dbus_fast`` "DBusError" zu lesen — und die Schleife ruft jede Sekunde
+    erneut ``Pair()``, erntet jedes Mal InProgress und liest es als Ablehnung,
+    also als Grund, den Bond zu entfernen. Am Fahrzeug gemessen: zwei
+    InProgress-Antworten füllten ein Fenster von 15 Sekunden.
+
+    Der Klassenname der Attrappe darf das Wort darum nicht tragen — sonst ist
+    "die Meldung kam an" nicht von "die Meldung ging verloren" zu
+    unterscheiden.
+    """
+    assert pairing._is_in_progress("[org.bluez.Error.InProgress] In Progress")
+    assert pairing._is_in_progress("org.bluez.Error.InProgress")
+    assert not pairing._is_in_progress("DBusError"), (
+        "der Klassenname von dbus_fast wurde als InProgress gelesen"
+    )
+    assert not pairing._is_in_progress(
+        "[org.bluez.Error.AuthenticationFailed] Authentication Failed"
+    )
+
+    # Und ``_try_pair`` gibt die Meldung zurück, nicht den Namen der Klasse.
+    bluez = _Bluez(paired=False, accepts=False)
+    saved = pairing._get_interface
+    pairing._get_interface = _interfaces(bluez)
+    try:
+        failure = asyncio.run(pairing._try_pair(object(), DEV))
+    finally:
+        pairing._get_interface = saved
+    assert failure is not None
+    assert "org.bluez.Error" in failure, (
+        f"der Fehlertext war nicht die BlueZ-Meldung: {failure!r}"
+    )
+
+
+def test_the_bond_drops_on_the_adapter_of_the_device_path(pairing) -> None:
+    """Ohne genannten Adapter kommt er aus dem Gerätepfad — ganz, und richtig.
+
+    Der Lastfall ist ein Aufruf ohne ``adapter_path``: dann ist der Adapter der
+    Kopf des Gerätepfads. Wird er falsch abgeschnitten, geht
+    ``Adapter1.RemoveDevice`` an ein Objekt, das keinen Adapter benennt, der
+    alte Bond bleibt liegen, und die Kopplung scheitert für die ganze Laufzeit.
+    """
+    bluez = _Bluez(paired=True, accepts=True)
+    assert _run_bluez_bond(pairing, bluez, trust=False, adapter_path=None) is True, (
+        f"ohne genannten Adapter kam kein Bond zustande: {bluez.calls}"
+    )
+    assert "remove" in bluez.calls, (
+        f"der alte Bond wurde nicht entfernt: {bluez.calls}"
+    )
+
+
+def test_a_bond_that_completes_under_an_in_progress_is_reported(pairing) -> None:
+    """Der Bond entsteht, während BlueZ noch an der ersten Anfrage arbeitet.
+
+    Drei Dinge fallen hier zusammen: der alte Bond wird entfernt, die neue
+    Anfrage wird mit InProgress beantwortet, und darunter kommt sie zustande.
+    Meldet ``_forget`` dann keinen Erfolg oder bleibt der Bond "verdächtig",
+    läuft die Schleife bis zum Ende ihres Zeitbudgets und meldet
+    "nicht gekoppelt" für eine Kopplung, die es gibt.
+    """
+    bluez = _Bluez(paired=True, accepts=True, pairs_after=1)
+    assert _run_bluez_bond(pairing, bluez, trust=False) is True, (
+        f"eine zustande gekommene Kopplung wurde nicht gemeldet: {bluez.calls}"
+    )
+
+
+def test_a_bond_made_over_the_proxy_link_is_reported_as_made(pairing) -> None:
+    """Der einzige Erfolgsausgang des Proxy-Pfads — und er wird zurückgegeben.
+
+    Der Config-Flow entscheidet an diesem Flag. Steht dort ``False``, sieht der
+    Nutzer "Kopplung fehlgeschlagen", obwohl das Panel den Bond quittiert hat
+    — und die offene, verschlüsselte Verbindung, die der Aufrufer laut
+    Docstring nun besitzt, wird bei einem Misserfolg nicht getrennt, leckt also.
+
+    Die bestehenden Prüfungen sehen das nicht: eine behauptet nur
+    ``result is not None`` über den Client, die andere stubt ``_bond_over_link``
+    im einzigen Fall, der überhaupt verbindet, auf ``False``.
+    """
+    (bonded, client), log = _run_ensure_bonded(
+        pairing, addresses=[IDENTITY], bluez_sees=True, has_proxy=True,
+        connects=True, bonds=True,
+    )
+
+    assert bonded is True, "ein gelungener Bond wurde als Misserfolg gemeldet"
+    assert client is not None, (
+        "die lebende, verschlüsselte Verbindung wurde nicht herausgegeben"
+    )
+    assert log["bonded_over_link"] == 1, (
+        f"nicht genau einmal über die Verbindung gebondet: {log}"
+    )
+    # Und ohne den Umweg über BlueZ: der Proxy-Pfad hat es selbst erledigt.
+    assert log["handover"] == [], f"unnötig an BlueZ übergeben: {log['handover']}"
+
+
+def test_a_bond_bluez_already_holds_is_trusted_by_default(pairing) -> None:
+    """Der Vorgabewert wird von genau einem Aufrufer benutzt — und er zählt.
+
+    Er gilt für den Zweig, in dem Home Assistant über einen lokalen Adapter
+    verbunden *hat* und die Verbindung an BlueZ übergibt. Dieser Aufrufer hat
+    gesehen, dass das Panel einen Link annimmt, darf einem gemeldeten Bond also
+    glauben. Kippt der Vorgabewert auf Misstrauen, steht ein Nutzer, der
+    "Neu konfigurieren" auf einem gesunden Bond auslöst, danach ohne Bond da —
+    der im Docstring ausdrücklich benannte Schaden.
+
+    Jede andere Prüfung übergibt ``trust_existing_bond`` ausdrücklich, und die
+    beiden Pfade, die den Vorgabewert erreichen könnten, ersetzen
+    ``_ensure_bonded_bluez`` durch einen Stub.
+    """
+    bluez = _Bluez(paired=True, accepts=True)
+    saved = {
+        name: getattr(pairing, name)
+        for name in ("_get_interface", "async_resolve_device", "_POLL_INTERVAL")
+    }
+    pairing._get_interface = _interfaces(bluez)
+    pairing.async_resolve_device = lambda *a, **k: _BluezDevice(DEV)
+    pairing._POLL_INTERVAL = 0
+    _Bus.current = bluez
+    try:
+        # Ohne das Schlüsselwort: genau so ruft der Übergabezweig auf.
+        bonded = asyncio.run(
+            pairing._ensure_bonded_bluez(
+                PANEL, IDENTITY, adapter_path=HCI0, timeout=1.0, hass=object()
+            )
+        )
+    finally:
+        for name, value in saved.items():
+            setattr(pairing, name, value)
+        _Bus.current = None
+
+    assert bonded is True
+    assert "remove" not in bluez.calls, (
+        f"ein funktionierender Bond wurde gelöscht: {bluez.calls}"
+    )
+    assert "pair" not in bluez.calls, (
+        f"ein gemeldeter Bond wurde neu geschlossen: {bluez.calls}"
     )
 
 
