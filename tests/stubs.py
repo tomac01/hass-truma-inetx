@@ -324,7 +324,7 @@ def install_homeassistant() -> None:
     mod("truma_pkg.truma", __path__=[str(SRC / "truma")])
 
 
-class _AlwaysFresh(importlib.machinery.SourceFileLoader):
+class AlwaysFresh(importlib.machinery.SourceFileLoader):
     """Den .pyc-Cache umgehen: immer den Quelltext von der Platte übersetzen.
 
     Eine ``.pyc`` nach Zeitstempel -- Pythons Standard -- gilt als gültig,
@@ -355,17 +355,63 @@ class _AlwaysFresh(importlib.machinery.SourceFileLoader):
         return self.source_to_code(self.get_data(filename), filename)
 
 
+class _FreshFinder:
+    """Auch das frisch übersetzen, was ein relativer Import nachzieht.
+
+    ``load`` deckt nur die Datei ab, die es selbst öffnet. Was diese dann per
+    ``from .truma.const import ...`` holt, geht über Pythons normalen
+    Pfad-Finder und damit wieder über den ``.pyc``-Cache -- gemessen am
+    2026-09-26 bei 27 der damals 40 Testdateien, erkennbar daran, dass sie
+    ``__pycache__``-Einträge für Integrationsmodule hinterließen, obwohl
+    ``AlwaysFresh`` keine schreibt. Dieser Finder sitzt vor dem normalen und
+    beantwortet alles unter ``truma_pkg`` mit einem ``AlwaysFresh``.
+
+    Gestubbte Module erreichen ihn nie: was schon in ``sys.modules`` steht,
+    wird gar nicht erst gesucht.
+    """
+
+    @staticmethod
+    def find_spec(fullname: str, path=None, target=None):
+        """Eine Integrationsdatei unter ``path`` finden, sonst weiterreichen."""
+        if not fullname.startswith("truma_pkg."):
+            return None
+        tail = fullname.rpartition(".")[2]
+        for entry in path or ():
+            file = Path(entry) / f"{tail}.py"
+            if file.is_file():
+                return spec_from_source(fullname, file)
+        return None
+
+
+# Beim Import, nicht auf Zuruf: ein Schutz, den eine Testdatei erst anfordern
+# muss, fehlt genau dort, wo jemand das Anfordern vergessen hat. Zwei Tests
+# laden ohne ``install_homeassistant``, dort wäre er sonst nicht da.
+if _FreshFinder not in sys.meta_path:
+    sys.meta_path.insert(0, _FreshFinder)
+
+
+def spec_from_source(fullname: str, file) -> importlib.machinery.ModuleSpec:
+    """Wie ``spec_from_file_location``, nur ohne den ``.pyc``-Cache.
+
+    Für die Testdateien, die ihre Module selbst öffnen statt ``load`` zu
+    rufen: sie stellen sich Home Assistant anders zusammen als hier, brauchen
+    aber denselben Loader, sonst liest ihr Import veralteten Bytecode.
+    """
+    spec = importlib.util.spec_from_file_location(
+        fullname, file, loader=AlwaysFresh(fullname, str(file))
+    )
+    assert spec is not None
+    return spec
+
+
 def load(name: str, package: str = "truma_pkg", path: Path = SRC) -> ModuleType:
     """Import one real module out of the integration, by file.
 
-    Always from source, never from bytecode -- see ``_AlwaysFresh``.
+    Always from source, never from bytecode -- see ``AlwaysFresh``.
     """
     fullname = f"{package}.{name}"
-    file = path / f"{name}.py"
-    spec = importlib.util.spec_from_file_location(
-        fullname, file, loader=_AlwaysFresh(fullname, str(file))
-    )
-    assert spec is not None and spec.loader is not None
+    spec = spec_from_source(fullname, path / f"{name}.py")
+    assert spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     sys.modules[fullname] = module
     spec.loader.exec_module(module)

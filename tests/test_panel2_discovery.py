@@ -52,6 +52,9 @@ import sys
 import types
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import stubs  # noqa: E402
+
 SRC = Path(__file__).resolve().parents[1] / "custom_components" / "truma_inetx"
 
 # The panel this integration was written against.
@@ -216,9 +219,7 @@ def _load():
     _mod("truma_pkg.pairing", ensure_bonded=None)
 
     def _real(name: str):
-        spec = importlib.util.spec_from_file_location(
-            f"truma_pkg.{name}", SRC / f"{name}.py"
-        )
+        spec = stubs.spec_from_source(f"truma_pkg.{name}", SRC / f"{name}.py")
         assert spec is not None and spec.loader is not None
         module = importlib.util.module_from_spec(spec)
         sys.modules[f"truma_pkg.{name}"] = module

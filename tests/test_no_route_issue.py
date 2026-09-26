@@ -31,6 +31,9 @@ import types
 from pathlib import Path
 from typing import TypedDict
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import stubs  # noqa: E402
+
 SRC = Path(__file__).resolve().parents[1] / "custom_components" / "truma_inetx"
 
 PANEL = "Truma iNetX-FFB4D1"
@@ -176,9 +179,7 @@ def _load():
          device_from_bluez=_no_bluez_device, close_link=_no_link_to_close)
 
     def _real(name: str):
-        spec = importlib.util.spec_from_file_location(
-            f"truma_pkg.{name}", SRC / f"{name}.py"
-        )
+        spec = stubs.spec_from_source(f"truma_pkg.{name}", SRC / f"{name}.py")
         assert spec is not None and spec.loader is not None
         module = importlib.util.module_from_spec(spec)
         sys.modules[f"truma_pkg.{name}"] = module

@@ -23,6 +23,9 @@ import sys
 import types
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import stubs  # noqa: E402
+
 SRC = Path(__file__).resolve().parents[1] / "custom_components" / "truma_inetx"
 
 
@@ -55,7 +58,7 @@ def _load():
         ("build_identity_frames", "build_register_frame", "build_subscribe_frame",
          "build_v3_frame", "build_write_frame", "parse_v3_frame"), None))
 
-    spec = importlib.util.spec_from_file_location("truma_pkg.ble", SRC / "ble.py")
+    spec = stubs.spec_from_source("truma_pkg.ble", SRC / "ble.py")
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     sys.modules["truma_pkg.ble"] = module

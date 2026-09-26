@@ -49,6 +49,9 @@ import sys
 import types
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import stubs  # noqa: E402
+
 SRC = Path(__file__).resolve().parents[1] / "custom_components" / "truma_inetx"
 
 PANEL = "Truma iNetX-401D00"
@@ -180,9 +183,7 @@ def _load_pairing():
         ),
     )
 
-    spec = importlib.util.spec_from_file_location(
-        "truma_pkg.pairing", SRC / "pairing.py"
-    )
+    spec = stubs.spec_from_source("truma_pkg.pairing", SRC / "pairing.py")
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     sys.modules["truma_pkg.pairing"] = module

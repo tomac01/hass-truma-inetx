@@ -32,6 +32,9 @@ import sys
 import types
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import stubs  # noqa: E402
+
 SRC = Path(__file__).resolve().parents[1] / "custom_components" / "truma_inetx"
 
 # The exact text the panel produced live when its device list had been cleared
@@ -87,9 +90,7 @@ def _load_pairing():
     _mod("truma_pkg.truma", __path__=[])
     _mod("truma_pkg.truma.const", CHAR_CMD="cmd-char")
 
-    spec = importlib.util.spec_from_file_location(
-        "truma_pkg.pairing", SRC / "pairing.py"
-    )
+    spec = stubs.spec_from_source("truma_pkg.pairing", SRC / "pairing.py")
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     sys.modules["truma_pkg.pairing"] = module

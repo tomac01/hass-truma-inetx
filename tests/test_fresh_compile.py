@@ -10,7 +10,7 @@ der alte Bytecode statt des neuen Quelltextes lief. Ein Test, der die Mutation
 nicht sieht, beweist nichts, und ein Mutationslauf, der das nicht merkt,
 bescheinigt eine Abdeckung, die es nicht gibt.
 
-``stubs._AlwaysFresh`` behebt das. Der Schutz kann aber still wieder
+``stubs.AlwaysFresh`` behebt das. Der Schutz kann aber still wieder
 verschwinden -- genau das war die Sorge beim Vorgänger ``f51673d``: dort hing
 der Eingriff an einem Monkeypatch hinter einer ``getattr``-Prüfung, die sich
 stillschweigend abgeschaltet hätte, ohne dass ein Test rot geworden wäre. Ein
@@ -154,7 +154,7 @@ def _stale_read_precondition(file: Path) -> None:
         f"ein unveränderter SourceFileLoader liest {stale} statt des alten Wertes 1. "
         "Damit ist die Voraussetzung dieses Regressionstests weggefallen -- CPython "
         "hält den .pyc-Eintrag nicht mehr für gültig, wenn mtime und Größe "
-        "unverändert bleiben. Das sagt nichts über stubs._AlwaysFresh; der Test "
+        "unverändert bleiben. Das sagt nichts über stubs.AlwaysFresh; der Test "
         "muss auf die neue Cache-Regel umgestellt werden"
     )
 
@@ -171,7 +171,7 @@ def test_load_sees_a_same_length_edit_behind_a_valid_cache_entry() -> None:
         assert module.ENTER_ELECTRIC == 2, (
             f"load() liest {module.ENTER_ELECTRIC} statt 2: Der alte Bytecode lief "
             "trotz geändertem Quelltext. Eine Mutation gleicher Länge innerhalb "
-            "derselben Sekunde käme in keinem Test an -- siehe stubs._AlwaysFresh"
+            "derselben Sekunde käme in keinem Test an -- siehe stubs.AlwaysFresh"
         )
 
 
@@ -193,8 +193,81 @@ def test_load_truma_sees_a_same_length_edit_behind_a_valid_cache_entry() -> None
         assert stubs.SRC == original_src, "stubs.SRC wurde nicht zurückgesetzt"
         assert module.ENTER_ELECTRIC == 2, (
             f"load_truma() liest {module.ENTER_ELECTRIC} statt 2: Der alte Bytecode "
-            "lief trotz geändertem Quelltext -- siehe stubs._AlwaysFresh"
+            "lief trotz geändertem Quelltext -- siehe stubs.AlwaysFresh"
         )
+
+
+def test_a_relative_import_also_sees_a_same_length_edit() -> None:
+    """Auch das nachgezogene Modul wird übersetzt, nicht aus dem Cache gelesen.
+
+    ``load`` öffnet nur die eine Datei. Was diese per ``from .x import y`` holt,
+    geht über Pythons normalen Pfad-Finder -- und damit wieder über den Cache,
+    solange ``stubs._FreshFinder`` nicht davor sitzt. Gemessen am 2026-09-26:
+    27 der 40 Testdateien luden so mindestens ein Integrationsmodul.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        directory = Path(tmp)
+
+        # Das nachgezogene Modul: Cache-Eintrag anlegen, dann gleich lang ändern.
+        pulled = directory / f"{PROBE}_pulled.py"
+        pulled.write_text(_probe_source(1), encoding="utf-8")
+        py_compile.compile(str(pulled), doraise=True)
+        _mutate_in_place(pulled)
+        _stale_read_precondition(pulled)
+
+        # Das Modul, das ``load`` öffnet, holt den Wert nur herüber.
+        front = directory / f"{PROBE}_front.py"
+        front.write_text(
+            f"from .{PROBE}_pulled import ENTER_ELECTRIC\n", encoding="utf-8"
+        )
+
+        # ``truma_pkg`` auf das Wegwerfverzeichnis zeigen lassen, damit der
+        # relative Import dort sucht. Danach wieder wegräumen.
+        saved = {
+            name: sys.modules.get(name)
+            for name in ("truma_pkg", f"truma_pkg.{PROBE}_front",
+                         f"truma_pkg.{PROBE}_pulled")
+        }
+        try:
+            stubs.mod("truma_pkg", __path__=[str(directory)])
+            module = stubs.load(f"{PROBE}_front", "truma_pkg", directory)
+            assert module.ENTER_ELECTRIC == 2, (
+                f"der relative Import liest {module.ENTER_ELECTRIC} statt 2: das "
+                "nachgezogene Modul kam aus dem alten Bytecode -- siehe "
+                "stubs._FreshFinder"
+            )
+        finally:
+            for name, was in saved.items():
+                if was is None:
+                    sys.modules.pop(name, None)
+                else:
+                    sys.modules[name] = was
+
+
+def test_spec_from_source_sees_a_same_length_edit() -> None:
+    """Der Weg der Testdateien, die ihre Module selbst öffnen.
+
+    Acht Testdateien stellen sich Home Assistant anders zusammen als ``stubs``
+    und rufen darum nicht ``load``, sondern öffnen ihr Modul selbst. Sie tun
+    das über ``spec_from_source``, das denselben Loader einsetzt.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        file = _plant_probe(Path(tmp))
+        _mutate_in_place(file)
+        _stale_read_precondition(file)
+
+        fullname = f"truma_pkg.{PROBE}_own"
+        spec = stubs.spec_from_source(fullname, file)
+        module = importlib.util.module_from_spec(spec)
+        try:
+            sys.modules[fullname] = module
+            spec.loader.exec_module(module)
+            assert module.ENTER_ELECTRIC == 2, (
+                f"spec_from_source() liest {module.ENTER_ELECTRIC} statt 2: der "
+                "alte Bytecode lief -- siehe stubs.AlwaysFresh"
+            )
+        finally:
+            sys.modules.pop(fullname, None)
 
 
 def test_the_probe_edit_holds_length_and_mtime() -> None:

@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -108,11 +109,17 @@ def test_a_download_reads_back_into_a_dump() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / "diagnostics.json"
         path.write_text(json.dumps(_download()))
+        # Der Bytecode-Cache des Werkzeugs gehört in dieses Verzeichnis, nicht
+        # neben die Quelle: es lädt die Integrationsmodule selbst, und ein
+        # ``__pycache__`` im Repo gälte als gültig, solange mtime (auf ganze
+        # Sekunden gerundet) und Größe stimmen -- eine gleichlange Mutation
+        # liefe also nie. Ein Verzeichnis pro Lauf ist garantiert leer.
         done = subprocess.run(
             [sys.executable, str(TOOL), str(path)],
             capture_output=True,
             text=True,
             cwd=ROOT,
+            env={**os.environ, "PYTHONPYCACHEPREFIX": str(Path(tmp) / "pycache")},
         )
 
     assert done.returncode == 0, done.stderr

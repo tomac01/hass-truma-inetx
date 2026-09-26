@@ -35,6 +35,9 @@ import sys
 import types
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import stubs  # noqa: E402
+
 SRC = Path(__file__).resolve().parents[1] / "custom_components" / "truma_inetx"
 
 _pkg = types.ModuleType("truma_pkg")
@@ -47,7 +50,7 @@ for _name, _path in (
     ("truma_pkg.truma.const", SRC / "truma" / "const.py"),
     ("truma_pkg.bus", SRC / "bus.py"),
 ):
-    _spec = importlib.util.spec_from_file_location(_name, _path)
+    _spec = stubs.spec_from_source(_name, _path)
     _module = importlib.util.module_from_spec(_spec)
     sys.modules[_name] = _module
     _spec.loader.exec_module(_module)
