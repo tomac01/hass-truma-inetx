@@ -231,6 +231,37 @@ def test_every_slider_end_any_row_offers_is_accepted() -> None:
             )
 
 
+def test_every_slider_row_brings_its_own_fallback_range() -> None:
+    """Keine Schieber-Zeile darf auf den namenlosen Bereich 0..100 fallen.
+
+    ``TrumaNumber._bounds`` endet mit ``self.row.fallback_bounds or (0, 100)``.
+    Heute ist die rechte Seite unerreichbar -- jede der vier Zeilen bringt
+    ihren eigenen Bereich mit --, und ein Mutationstest meldet sie folglich
+    als unerreichte Stelle. Das ist richtig und soll so bleiben: geprüft wird
+    hier nicht die 100, sondern dass niemand sie nötig hat.
+
+    Ohne diese Prüfung fiele eine neu eingetragene Zeile ohne eigenen Bereich
+    still auf 0..100 -- ein Schieber mit falschen Anschlägen, der nichts
+    kaputt macht und deshalb niemandem auffällt, bis jemand ihn bis zum
+    Anschlag zieht und der eigene Validator den Wert ablehnt. Genau die
+    Bugklasse, um die es in dieser Datei geht.
+    """
+    rows = [
+        (topic, param, row)
+        for (topic, param), row_list in PROFILES.ROWS.items()
+        for row in row_list
+        if row.platform == "number"
+    ]
+    assert rows, "keine Schieber-Zeile gefunden -- die Tabelle hat sich bewegt"
+    for topic, param, row in rows:
+        assert row.fallback_bounds is not None, (
+            f"{topic}.{param} bringt keinen eigenen Bereich mit und fiele "
+            f"auf 0..100 zurück"
+        )
+        low, high = row.fallback_bounds
+        assert low < high, f"{topic}.{param} hat den entarteten Bereich {low}..{high}"
+
+
 def test_each_setpoint_end_the_climate_offers_is_accepted() -> None:
     """Die Anschläge des Sollwert-Schiebers, je Modus, gegen die Tabelle.
 

@@ -268,6 +268,35 @@ def test_current_option_is_derived_from_both_levels() -> None:
         assert select.current_option == expected, (diesel, electric)
 
 
+def test_a_level_that_stops_being_a_number_makes_the_answer_unknown() -> None:
+    """Ein Pegel ohne Zahl heißt "unbekannt", nicht "der andere gilt".
+
+    Bei der Geburt der Entität sind beide Pegel Zahlen -- sie entsteht ja
+    erst, wenn beide gemeldet wurden. Danach nicht mehr zwingend: meldet ein
+    Frame für einen der beiden ``null``, steht nur noch die halbe Wahrheit im
+    Bus. Ohne den Typtest beantwortete die Auswahl das mit dem Pegel, der
+    noch eine Zahl hat -- also "diesel", obwohl über den Netzbetrieb gerade
+    nichts bekannt ist. Beide Richtungen, damit keine durch die eine Hälfte
+    des Tests gedeckt scheint.
+    """
+    for gone, kept in (("DieselLevel", "ElectricLevel"),
+                       ("ElectricLevel", "DieselLevel")):
+        coordinator = _Coordinator(BUS.Bus())
+        made = stubs.setup_platform(SELECT, coordinator)
+        _both_reported(coordinator)
+        select = _by_class(made, "TrumaEnergySourceSelect")
+
+        coordinator.report("EnergySrc", gone, 1, HEATER)
+        coordinator.report("EnergySrc", kept, 1, HEATER)
+        assert select.current_option == "hybrid", gone
+
+        coordinator.report("EnergySrc", gone, None, HEATER)
+        assert select.current_option is None, (
+            f"{gone} ist keine Zahl mehr, die Auswahl zeigte trotzdem "
+            f"{select.current_option!r}"
+        )
+
+
 def test_it_says_changing_while_the_transaction_runs() -> None:
     """Zwei Writes sind ein Moment, in dem der Zustand nicht stimmt."""
     coordinator = _Coordinator(BUS.Bus())
