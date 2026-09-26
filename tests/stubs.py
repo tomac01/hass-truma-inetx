@@ -36,11 +36,16 @@ SRC = ROOT / "custom_components" / "truma_inetx"
 # Gemessen am 2026-09-26: eine Datei mit ``assert False`` meldet unter ``-O``
 # "all checks OK" und endet mit Rückgabewert 0. Lieber laut abbrechen als
 # still bestehen -- das gilt für jede Testdatei, denn alle importieren dies.
+# Kennung in der Abbruchmeldung: so erkennt ein Test den Abbruch, ohne den
+# Wortlaut zu kennen, und eine Umformulierung bricht ihn nicht.
+NEEDS_ASSERTIONS = "truma-tests-need-assertions"
+
 if not __debug__:
     raise SystemExit(
-        "Dieser Testlauf braucht aktive assert-Anweisungen. Unter -O, -OO oder "
-        "PYTHONOPTIMIZE entfernt CPython sie, und jede Prüfung hier bestünde, "
-        "ohne etwas geprüft zu haben. Ohne -O laufen lassen."
+        f"{NEEDS_ASSERTIONS}: Dieser Testlauf braucht aktive "
+        "assert-Anweisungen. Unter -O, -OO oder PYTHONOPTIMIZE entfernt "
+        "CPython sie, und jede Prüfung hier bestünde, ohne etwas geprüft zu "
+        "haben. Ohne -O laufen lassen."
     )
 
 

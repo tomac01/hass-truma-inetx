@@ -69,6 +69,7 @@ Run: ``python3 tests/test_fresh_compile.py``
 from __future__ import annotations
 
 import ast
+import concurrent.futures
 import contextlib
 import hashlib
 import importlib.machinery
@@ -428,6 +429,40 @@ def test_no_test_file_slips_past_the_fresh_loader() -> None:
     )
 
 
+def test_every_test_file_reaches_that_refusal() -> None:
+    """Und zwar jede Datei in ``tests/``, nicht nur diese hier.
+
+    Die Sperre sitzt in ``stubs``, der CI-Schritt ruft die Dateien aber
+    einzeln auf. Eine künftige Testdatei, die ``stubs`` nicht importiert,
+    fiele lautlos aus der Sperre -- heute erreichen sie alle, 40 direkt und
+    ``test_transport_ack_order`` über die Datei, die es selbst lädt. Geprüft
+    wird die Wirkung, nicht der Mechanismus: nicht "enthält ``import
+    stubs``", sondern "bricht unter ``-O`` wirklich ab". Damit gilt der Test
+    auch für die Datei, die noch niemand geschrieben hat.
+    """
+    def refuses(file: Path) -> str | None:
+        """Den Namen liefern, falls diese Datei unter ``-O`` durchläuft."""
+        done = subprocess.run(
+            [sys.executable, "-O", str(file)], capture_output=True, text=True,
+        )
+        if done.returncode == 0 or stubs.NEEDS_ASSERTIONS not in done.stderr:
+            return f"{file.name} (rc={done.returncode})"
+        return None
+
+    # Nebenläufig, sonst kostet dieser Fall allein mehr als der ganze übrige
+    # Lauf: ein Unterprozess je Datei, und jeder wartet vor allem auf den
+    # Interpreterstart. Die Prozesse teilen nichts, die Reihenfolge zählt nicht.
+    files = sorted(TESTS.glob("test_*.py"))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+        missed = sorted(name for name in pool.map(refuses, files) if name)
+
+    assert not missed, (
+        f"diese Dateien laufen unter -O an der Sperre vorbei: {missed}. Sie "
+        "erreichen stubs nicht, also liefen sie ohne aktive "
+        "assert-Anweisungen durch und meldeten Erfolg, ohne zu prüfen"
+    )
+
+
 def test_the_watchdog_catches_every_way_around_it() -> None:
     """Den Wächter selbst prüfen, an Wegwerfdateien statt am Verzeichnis.
 
@@ -502,7 +537,7 @@ def test_the_suite_refuses_to_run_without_assertions() -> None:
             "ganze Suite ohne aktive assert-Anweisungen durch und meldet "
             "Erfolg, ohne etwas geprüft zu haben -- siehe die Sperre in stubs"
         )
-        assert "assert" in done.stderr, (
+        assert stubs.NEEDS_ASSERTIONS in done.stderr, (
             f"unter {flag} bricht der Import ab, aber die Meldung nennt den "
             f"Grund nicht: {done.stderr.strip()!r}"
         )
