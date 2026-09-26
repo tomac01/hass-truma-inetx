@@ -68,8 +68,15 @@ def _load():
 
 BLE = _load()
 
-PATH = "/org/bluez/hci0/dev_50_98_93_FF_B4_D1"
-PROPS = {"Address": "50:98:93:FF:B4:D1", "Alias": "Truma iNetX-FFB4D1"}
+# Erfundene Identitätsadresse des Panels: jedes Byte stammt aus den
+# Platzhalter-Bytes, die ``test_placeholder_addresses.py`` zulässt. Die Form
+# bleibt trotzdem bedeutungstragend und darf nicht beliebig geändert werden:
+# das erste Byte (0x88) trägt oben nicht das Bitmuster ``01`` einer
+# Resolvable Private Address, und der Namenssuffix im Alias sind die letzten
+# drei Bytes der Adresse -- genau so, wie das Panel seinen Namen bildet.
+PANEL_ADDRESS = "88:99:AA:BB:CC:DD"
+PATH = "/org/bluez/hci0/dev_88_99_AA_BB_CC_DD"
+PROPS = {"Address": PANEL_ADDRESS, "Alias": "Truma iNetX-BBCCDD"}
 
 
 def _install_manager(properties: dict) -> None:
@@ -90,9 +97,11 @@ def test_device_is_built_from_bluez_without_an_advert() -> None:
         PATH: {"org.bluez.Device1": PROPS},
     })
 
-    device = asyncio.run(BLE.device_from_bluez("50:98:93:ff:b4:d1"))
+    # Klein geschrieben mit Absicht: der Aufrufer darf jede Schreibweise
+    # liefern, zurück kommt die normalisierte Adresse.
+    device = asyncio.run(BLE.device_from_bluez(PANEL_ADDRESS.lower()))
     assert device is not None
-    assert device.address == "50:98:93:FF:B4:D1"
+    assert device.address == PANEL_ADDRESS
     # exactly what bleak's own scanner puts in details
     assert device.details == {"path": PATH, "props": PROPS}
 
@@ -111,7 +120,7 @@ def test_no_bluez_at_all_is_not_an_error() -> None:
     _mod("bleak.backends.bluezdbus.defs", DEVICE_INTERFACE="org.bluez.Device1")
     _mod("bleak.backends.bluezdbus.manager", get_global_bluez_manager=_boom)
 
-    assert asyncio.run(BLE.device_from_bluez("50:98:93:FF:B4:D1")) is None
+    assert asyncio.run(BLE.device_from_bluez(PANEL_ADDRESS)) is None
 
 
 if __name__ == "__main__":

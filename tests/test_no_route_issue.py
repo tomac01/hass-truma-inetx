@@ -36,10 +36,25 @@ import stubs  # noqa: E402
 
 SRC = Path(__file__).resolve().parents[1] / "custom_components" / "truma_inetx"
 
-PANEL = "Truma iNetX-FFB4D1"
+PANEL = "Truma iNetX-BBCCDD"
 SERVICE_UUID = "fc310002-f3b2-11e8-8eb2-f2801f1b9fd1"
 # What the panel puts in the advertisement itself, as opposed to its GATT table.
 ADVERT_SERVICE_UUID = "fc310000-f3b2-11e8-8eb2-f2801f1b9fd1"
+
+# Erfundene Adressen: jedes Byte stammt aus den Platzhalter-Bytes, die
+# ``test_placeholder_addresses.py`` zulässt. Ihre Form ist trotzdem
+# bedeutungstragend -- wer sie ändert, ändert, was die Datei prüft:
+#
+# * ``IDENTITY`` endet auf den Namenssuffix von ``PANEL`` -- also auf ihre
+#   letzten drei Bytes ohne Doppelpunkte. Nur daran erkennt
+#   ``bt.address_kind`` die Identitätsadresse. Ihr erstes Byte (0x88) trägt
+#   oben nicht das Bitmuster ``01``, ist also keine RPA.
+# * ``RPA`` und ``RPA2`` sind Resolvable Private Addresses: die oberen zwei
+#   Bits des ersten Bytes sind ``01`` (0x44, 0x66). Sie dürfen NICHT auf den
+#   Namenssuffix enden, sonst gelten sie als Identitätsadresse.
+IDENTITY = "88:99:AA:BB:CC:DD"
+RPA = "44:55:66:77:88:99"
+RPA2 = "66:77:88:99:AA:BB"
 
 
 def _mod(name: str, **attrs):
@@ -56,7 +71,7 @@ class _Info:
         self,
         name: str = "",
         uuids: tuple[str, ...] = (),
-        address: str = "62:4A:BD:AD:73:5D",
+        address: str = RPA,
         time: float = 0.0,
     ) -> None:
         self.name = name
@@ -286,11 +301,6 @@ def test_success_clears() -> None:
     for _ in range(CONST.NO_ROUTE_MISSES_BEFORE_WARNING - 1):
         c._async_note_no_route()
     assert not IR.active
-
-
-RPA = "62:4A:BD:AD:73:5D"
-RPA2 = "7C:11:0E:22:91:04"
-IDENTITY = "50:98:B8:FF:B4:D1"  # last three bytes == the panel's name suffix
 
 
 def _set_route(*devices: _ScannerDevice) -> None:

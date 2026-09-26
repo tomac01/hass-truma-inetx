@@ -31,10 +31,20 @@ Was der Test festnagelt:
 2. die aufgeführten Dateien gibt es überhaupt -- eine umbenannte Datei soll
    die Prüfung nicht stillschweigend leerlaufen lassen.
 
-Warum nicht das ganze Verzeichnis: Mehrere ältere Testdateien führen
-Adressen, die dieser Regel nicht genügen. Sie umzustellen ist eine eigene
-Aufgabe mit eigenem Prüfaufwand und gehört nicht in die Behebung, für die
-dieser Test geschrieben wurde. Wer eine Datei umstellt, trägt sie hier nach.
+Warum nicht das ganze Verzeichnis: Mehrere ältere Testdateien führen weiterhin
+Adressen, die dieser Regel nicht genügen. Jede einzelne umzustellen kostet
+eigenen Prüfaufwand -- eine Adresse trägt oft eine Form, die der Test braucht
+(eine RPA muss oben ``01`` stehen haben, eine Identitätsadresse muss auf den
+Namenssuffix des Panels enden), und ein blind ersetzter Wert prüft danach
+etwas anderes. Die Liste wächst deshalb Datei für Datei. Wer eine umstellt,
+trägt sie hier nach; zuletzt geschehen am 2026-09-26 für
+``test_no_route_issue.py`` und ``test_device_from_bluez.py``, in denen ein
+Review echte Adressen des Panels gefunden hatte.
+
+Was dieser Test NICHT sieht: eine Adresse, die nicht mit Doppelpunkten
+geschrieben ist. BlueZ schreibt sie in seinen D-Bus-Pfaden mit Unterstrichen
+(``dev_AA_BB_CC_DD_EE_FF``), und ein solcher Pfad fällt hier durch keine
+Prüfung -- wer einen einträgt, prüfe die Bytes selbst.
 
 Nicht abgedeckt: alles, was keine Adresse ist. Ein Hostname, eine Seriennummer
 oder ein Schlüssel aus einem echten Aufbau fällt hier nicht auf -- ein Test,
@@ -58,6 +68,8 @@ TESTS = Path(__file__).resolve().parent
 GUARDED = (
     "test_proxy_route.py",
     "test_connection_sensors.py",
+    "test_no_route_issue.py",
+    "test_device_from_bluez.py",
 )
 
 # Bytes, die als Platzhalter durchgehen: doppelte Ziffern und doppelte
