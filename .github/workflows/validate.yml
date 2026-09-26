@@ -8,6 +8,12 @@ on:
     - cron: "0 4 * * 1"
   workflow_dispatch:
 
+# Rechte für den ganzen Workflow: Alle Jobs lesen nur -- Checkout, pip, Tests.
+# Oben statt je Job, damit auch ein später ergänzter Job nicht wieder mit dem
+# Repo-Standard des GITHUB_TOKEN läuft.
+permissions:
+  contents: read
+
 jobs:
   hassfest:
     name: hassfest

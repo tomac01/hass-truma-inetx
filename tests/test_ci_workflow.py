@@ -52,7 +52,13 @@ Was der Test festnagelt:
    ``pip install`` -- nur so beweist der Durchlauf, dass sie ohne
    Drittbibliothek auskommen,
 9. jeder eigene Python-Schritt läuft nach einem ``pip install``, und wer
-   ``cbor2`` importiert, nach dem ``pip install`` von ``cbor2``.
+   ``cbor2`` importiert, nach dem ``pip install`` von ``cbor2``,
+10. der Workflow schränkt die Rechte des ``GITHUB_TOKEN`` auf Lesen ein: ein
+    ``permissions``-Block steht auf oberster Ebene und gibt ``contents: read``
+    her, und kein Block im Workflow -- oben oder je Job -- vergibt mehr als
+    ``read``. Fehlt der Block, läuft jeder Job wieder mit dem Repo-Standard,
+    und das fällt sonst nirgends auf: Die CI bleibt grün, weil kein Schritt
+    die zusätzlichen Rechte braucht.
 
 Nicht abgedeckt: ob ein Test inhaltlich etwas prüft. Hier geht es allein
 darum, dass er überhaupt gestartet wird.
@@ -97,6 +103,11 @@ JOB_KEY = re.compile(r"^    ([A-Za-z0-9_-]+):", re.M)
 MUFFLERS = frozenset({"continue-on-error", "if"})
 # Der Glob-Schritt: daran erkennen wir ihn, und genau das soll er bleiben.
 GLOB_LOOP = "for path in tests/test_*.py"
+
+# Ein Rechte-Eintrag, der nichts erlaubt, was über Lesen hinausgeht. ``write``
+# steht hier bewusst nicht als Verbot, sondern ``read``/``none`` als einzige
+# Erlaubnis: ``write-all``, ``read-all`` und jeder Tippfehler fallen damit auf.
+PERMISSION_LINE = re.compile(r"^[a-z][a-z-]*: (?:read|none)$")
 
 # Attrappen für den Verhaltenstest des Glob-Schritts. Die grüne schreibt ihren
 # Namen mit, damit sich belegen lässt, dass sie wirklich gelaufen ist.
@@ -239,6 +250,41 @@ def _pip_installs(steps: list[str]) -> list[tuple[int, str]]:
         for index, step in enumerate(steps)
         for packages in PIP_INSTALL.findall(step)
     ]
+
+
+def _permission_blocks() -> list[tuple[str, str]]:
+    """``(Ort, Inhalt)`` für jeden ``permissions``-Schlüssel im Workflow.
+
+    Der Ort ist die Einrückung: 0 heißt oberste Ebene und gilt damit für jeden
+    Job, 4 heißt Job-Ebene und überschreibt sie für diesen einen Job. Der
+    Inhalt ist der Kurzwert hinter dem Doppelpunkt (``{}``, ``read-all``,
+    ``write-all``) oder, wenn dort nichts steht, die eingerückten Zeilen
+    darunter.
+    """
+    lines = [
+        line
+        for line in WORKFLOW.read_text(encoding="utf-8").splitlines()
+        if not line.lstrip().startswith("#")
+    ]
+    blocks: list[tuple[str, str]] = []
+    for index, line in enumerate(lines):
+        match = re.match(r"^( *)permissions:(.*)$", line)
+        if not match:
+            continue
+        indent, inline = match.group(1), match.group(2).strip()
+        where = "oberste Ebene" if not indent else f"Einrückung {len(indent)}"
+        if inline:
+            blocks.append((where, inline))
+            continue
+        body: list[str] = []
+        for follow in lines[index + 1 :]:
+            if not follow.strip():
+                continue
+            if len(follow) - len(follow.lstrip()) <= len(indent):
+                break
+            body.append(follow.strip())
+        blocks.append((where, "\n".join(body)))
+    return blocks
 
 
 def _python_test_files() -> list[str]:
@@ -545,6 +591,48 @@ def test_each_library_test_runs_after_its_install() -> None:
         for library in _direct_imports(name):
             assert any(library in packages for packages in earlier), (
                 f"{name} importiert {library}, aber kein pip install davor nennt es"
+            )
+
+
+def test_the_workflow_declares_the_token_rights_at_all() -> None:
+    """Ohne Block gilt der Repo-Standard, und den setzt nicht dieser Workflow.
+
+    Er steht absichtlich oben und nicht je Job: So erbt auch ein Job, den
+    später jemand hinzufügt, die Leserechte, statt still mit dem Standard zu
+    laufen. ``contents: read`` ist die Untergrenze, weil jeder Job das Repo
+    auscheckt.
+    """
+    top = [text for where, text in _permission_blocks() if where == "oberste Ebene"]
+    assert len(top) == 1, (
+        "validate.yml soll genau einen permissions-Block auf oberster Ebene "
+        f"haben, gefunden: {len(top)} -- ohne ihn läuft jeder Job mit dem "
+        "Repo-Standard des GITHUB_TOKEN"
+    )
+    assert "contents: read" in top[0], (
+        "der permissions-Block oben gibt kein 'contents: read' her, das "
+        f"actions/checkout in jedem Job braucht:\n{top[0]}"
+    )
+
+
+def test_no_permissions_block_grants_more_than_reading() -> None:
+    """Kein Schritt schreibt, also darf kein Block Schreibrechte vergeben.
+
+    Geprüft wird jeder Block, auch ein Block auf Job-Ebene: Der überschreibt
+    die Rechte von oben und wäre die stille Lücke, die der Block oben nicht
+    schließt.
+    """
+    blocks = _permission_blocks()
+    assert blocks, "validate.yml hat keinen permissions-Block mehr"
+    for where, content in blocks:
+        entries = [line for line in content.splitlines() if line.strip()]
+        if content.strip() == "{}":
+            continue  # gar keine Rechte -- enger geht es nicht.
+        assert entries, f"der permissions-Block ({where}) ist leer"
+        for entry in entries:
+            assert PERMISSION_LINE.match(entry), (
+                f"der permissions-Block ({where}) enthält {entry!r} -- erlaubt "
+                "ist nur '<scope>: read' oder '<scope>: none'; alles andere "
+                "gibt dem GITHUB_TOKEN mehr, als dieser Workflow braucht"
             )
 
 
