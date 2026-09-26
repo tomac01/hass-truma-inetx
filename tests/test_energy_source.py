@@ -14,16 +14,19 @@ Was der Test festnagelt:
 2. Elektro und Hybrid werden immer bei 900 W betreten,
 3. beide Parameter gehen als GENAU EINE Transaktion raus, mit action und
    target, und kein Einzelwrite daneben,
-4. der aktuelle Zustand wird aus beiden Pegeln abgeleitet,
-5. während der Umstellung meldet sie "changing", und die Optionsliste ist
+4. innerhalb dieser Transaktion wird die neue Quelle eingeschaltet, bevor die
+   alte abgeschaltet wird -- nach jedem einzelnen Befehl ist mindestens eine
+   Quelle an, aus jedem Ausgangszustand,
+5. der aktuelle Zustand wird aus beiden Pegeln abgeleitet,
+6. während der Umstellung meldet sie "changing", und die Optionsliste ist
    sonst genau die der drei Quellen,
-6. eine unbekannte Option wird abgewiesen, statt mit KeyError zu platzen,
-7. die Entität entsteht genau einmal, egal wie viele Updates folgen
+7. eine unbekannte Option wird abgewiesen, statt mit KeyError zu platzen,
+8. die Entität entsteht genau einmal, egal wie viele Updates folgen
    (zweimal hieße doppelte unique_id),
-8. sie wartet auf den Namen ihres Geräts (#23),
-9. der Upstream-Diesel-Schalter bleibt erhalten -- er ist die einzige
-   Möglichkeit, den Brenner einzeln zu schalten,
-10. sie entsteht einmal für den ganzen Bus, am ersten Gerät, das beide Pegel
+9. sie wartet auf den Namen ihres Geräts (#23),
+10. der Upstream-Diesel-Schalter bleibt erhalten -- er ist die einzige
+    Möglichkeit, den Brenner einzeln zu schalten,
+11. sie entsteht einmal für den ganzen Bus, am ersten Gerät, das beide Pegel
     meldete -- die Eigenschaft von ``addr=None``, festgehalten, damit ein Bus
     mit zwei Publishern hier auffällt und nicht am Fahrzeug.
 
@@ -138,15 +141,20 @@ def test_the_electric_level_alone_does_not_do_either() -> None:
 
 
 def test_electric_and_hybrid_enter_at_900w() -> None:
-    """1800 W wirft an schwachen Landanschlüssen den Automaten."""
+    """1800 W wirft an schwachen Landanschlüssen den Automaten.
+
+    Die Reihenfolge steht hier mit drin, weil sie in der erwarteten Liste
+    nicht zu umgehen ist; worum es bei ihr geht, prüft
+    test_the_new_source_is_on_before_the_old_one_goes_off.
+    """
     coordinator = _Coordinator(BUS.Bus())
     made = stubs.setup_platform(SELECT, coordinator)
     _both_reported(coordinator)
 
     commands, action, target = _selected(coordinator, made, "electric")
     assert commands == [
-        (HEATER, "EnergySrc", "DieselLevel", 0),
         (HEATER, "EnergySrc", "ElectricLevel", 1),
+        (HEATER, "EnergySrc", "DieselLevel", 0),
     ], commands
     assert action == "energy_source"
     assert target == "electric"
@@ -172,6 +180,57 @@ def test_diesel_switches_the_electric_element_off() -> None:
     ], commands
     assert action == "energy_source"
     assert target == "diesel"
+
+
+def test_the_new_source_is_on_before_the_old_one_goes_off() -> None:
+    """Zwischen den beiden Pegelbefehlen darf nie beides aus sein.
+
+    Die beiden Writes einer Transaktion gehen nacheinander raus, und zwischen
+    ihnen liegen bis zu 40 Sekunden (``_WRITE_SETTLE`` plus die Wartezeit auf
+    die Bestätigung jedes einzelnen). Scheitert der zweite, bleibt stehen, was
+    der erste angerichtet hat. Schaltet der erste die bisherige Quelle ab,
+    steht die Heizung danach dauerhaft ohne Energiequelle da -- genau der
+    Zustand, den diese Auswahl verhindern soll.
+
+    Dass der zweite Befehl scheitert, ist nicht theoretisch: der eben
+    abgeschaltete Brenner geht ins Nachlüften, und für diese Phase ist in
+    ``coordinator.async_write_many`` dokumentiert, dass das Panel Frames
+    quittiert, die die Heizung nicht ausführt.
+
+    Deshalb prüft dieser Test jeden Zwischenstand und nicht nur das Ergebnis:
+    nach JEDEM einzelnen Befehl muss mindestens eine Quelle an sein. Geprüft
+    aus jedem Ausgangszustand, den es geben kann -- auch aus "beide aus", das
+    beim Einschalten der Heizung vorkommt, und mit 1800 W als Elektropegel.
+    """
+    coordinator = _Coordinator(BUS.Bus())
+    made = stubs.setup_platform(SELECT, coordinator)
+    _both_reported(coordinator)
+
+    for start in ((1, 0), (0, 1), (0, 2), (1, 1), (1, 2), (0, 0)):
+        for option, expected in (
+            ("diesel", {"DieselLevel": 1, "ElectricLevel": 0}),
+            ("electric", {"DieselLevel": 0, "ElectricLevel": 1}),
+            ("hybrid", {"DieselLevel": 1, "ElectricLevel": 1}),
+        ):
+            coordinator.report("EnergySrc", "DieselLevel", start[0], HEATER)
+            coordinator.report("EnergySrc", "ElectricLevel", start[1], HEATER)
+            commands, _, _ = _selected(coordinator, made, option)
+
+            levels = {"DieselLevel": start[0], "ElectricLevel": start[1]}
+            for step, (_addr, _topic, param, value) in enumerate(commands, start=1):
+                levels[param] = value
+                assert any(levels.values()), (
+                    f"{start} -> {option}: nach Befehl {step} ({param}={value}) "
+                    f"hat die Heizung keine Energiequelle mehr"
+                )
+
+            # Und das Ziel wird trotzdem erreicht: ein Abschaltbefehl, der
+            # einfach wegfiele, käme durch die Prüfung oben ebenfalls durch.
+            assert levels == expected, f"{start} -> {option}: {levels}"
+            assert sorted(param for _a, _t, param, _v in commands) == [
+                "DieselLevel",
+                "ElectricLevel",
+            ], commands
 
 
 def test_an_unknown_option_is_refused() -> None:

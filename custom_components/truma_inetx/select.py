@@ -46,6 +46,34 @@ _ENERGY_WRITES = {
 }
 
 
+def _ordered_levels(diesel: int, electric: int) -> list[tuple[str, int]]:
+    """Die beiden Pegelbefehle so ordnen, dass nie beide Quellen aus sind.
+
+    Eine Transaktion heißt nicht, dass beide Pegel gleichzeitig ankommen: die
+    Befehle gehen nacheinander raus, jeder wird einzeln bestätigt, und
+    dazwischen liegen bis zu 40 Sekunden. Scheitert der zweite, bleibt stehen,
+    was der erste angerichtet hat.
+
+    Käme das Abschalten zuerst, wäre das übrig bleibende genau der Zustand,
+    den diese Auswahl verhindern soll -- eine Heizung ohne Energiequelle, ohne
+    dass irgendwo ein Fehler erschiene. Und er ist nicht unwahrscheinlich: der
+    eben abgeschaltete Brenner geht ins Nachlüften, und für diese Phase ist in
+    ``coordinator.async_write_many`` dokumentiert, dass das Panel Frames
+    quittiert, die die Heizung nicht ausführt.
+
+    Also erst einschalten, dann abschalten. Keine der drei Auswahlen schaltet
+    beide Pegel ab, deshalb ist nach dem ersten Befehl immer eine Quelle an --
+    aus jedem Ausgangszustand, auch aus "beide aus", das beim Einschalten der
+    Heizung vorkommt. Der Preis ist ein kurzer Hybridbetrieb, wenn die alte
+    Quelle noch läuft: ein Zustand, den die Anlage ohnehin kennt, und der
+    schlechtere von zwei Zwischenständen ist er nicht.
+
+    ``sorted`` ist stabil, Diesel bleibt also vor Elektro, wo beide einschalten.
+    """
+    levels = [("DieselLevel", diesel), ("ElectricLevel", electric)]
+    return sorted(levels, key=lambda level: level[1] == 0)
+
+
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: TrumaConfigEntry,
@@ -221,18 +249,20 @@ class TrumaEnergySourceSelect(TrumaEntity, SelectEntity):
         return None
 
     async def async_select_option(self, option: str) -> None:
-        """Beide Pegel als eine Transaktion schreiben.
+        """Beide Pegel als eine Transaktion schreiben, Einschalten zuerst.
 
-        Eine Transaktion und nicht zwei Writes: dazwischen stünde das Fahrzeug
-        kurz ohne Energiequelle oder auf einer, die niemand angefordert hat.
+        Eine Transaktion und nicht zwei getrennte Befehle: nur so steht am
+        Ende entweder der angeforderte Zustand oder ein Fehler. Innerhalb der
+        Transaktion legt ``_ordered_levels`` die Reihenfolge fest -- dort steht
+        auch, warum sie vom Ziel abhängt.
         """
         if option not in _ENERGY_WRITES:
             raise HomeAssistantError(f"Unknown energy source {option}")
         diesel, electric = _ENERGY_WRITES[option]
         await self.coordinator.async_write_many(
             [
-                (self._addr, "EnergySrc", "DieselLevel", diesel),
-                (self._addr, "EnergySrc", "ElectricLevel", electric),
+                (self._addr, "EnergySrc", param, value)
+                for param, value in _ordered_levels(diesel, electric)
             ],
             action="energy_source",
             target=option,
