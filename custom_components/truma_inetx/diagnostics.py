@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import asdict
 from typing import Any
 
@@ -13,13 +14,15 @@ from .coordinator import TrumaConfigEntry
 
 # The BLE address is a resolvable private address that still pins the panel to
 # a location, and muid/uuid are the persisted app identity the panel bonds
-# against. The bus state itself carries nothing identifying.
+# against. The bus carries addresses too, but not under names like these --
+# see ``_ADDRESS_SHAPED`` below, which is what covers them.
 # discovery_keys is here because redaction works on key names and that
 # subtree hides the address inside a value: Home Assistant serialises the key
 # as ``"repr": "DiscoveryKey(domain='bluetooth', key='44:55:66:77:88:99',
 # version=1)"``, which no address-named key matches. Every download written
 # before this line carried the panel's address in it, the three attached to
-# issue #22 included.
+# issue #22 included. The value pass below would now catch it as well; the key
+# stays because the whole subtree is of no use to a reader anyway.
 TO_REDACT = {
     CONF_ADDRESS,
     CONF_NAME,
@@ -30,6 +33,50 @@ TO_REDACT = {
     "uuid",
     "discovery_keys",
 }
+
+# Home Assistant's own marker, so a download carries one spelling however the
+# value was reached.
+REDACTED = "**REDACTED**"
+
+# An address in every spelling a download has been seen carrying, and the
+# panel's advertised name, whose last three bytes are its identity address.
+#
+# Key names cannot find these, which is why ``TO_REDACT`` is not the whole
+# answer. On the bus a key name is the panel's own vocabulary rather than ours,
+# and the addresses that are on it sit in *values* of keys that say nothing:
+# the LevelControl gas-bottle sensors publish their own MAC as an ordinary
+# string parameter, described as ``{"type": 4, "avail": 1}`` like any other,
+# and measured on the vehicle of #35 as
+#
+#     "0x0603": {"params": {"BluetoothDevice.BleAddress": "90:7B:C6:..",
+#                           "BluetoothDevice.BleAddressType": 0, ...
+#
+# with ``BleAddressType: 0`` saying they are public, so permanent rather than
+# rotating. One of the two shared a prefix with that panel's identity address.
+# Redacting only ``BleAddress`` by name would cover those two and nothing a
+# device publishes next under another name.
+#
+# Values only, never keys: two addresses used as keys in one dict would redact
+# to one key and silently drop an entry. ``tools/import_dump.py`` hunts the
+# same patterns on the way into ``dumps/`` and refuses a file where one
+# survives, which is what catches a download taken before this line existed.
+_ADDRESS_SHAPED = (
+    re.compile(r"\b(?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}\b"),
+    re.compile(r"\b(?:[0-9A-Fa-f]{2}-){5}[0-9A-Fa-f]{2}\b"),
+    re.compile(r"iNetX-[0-9A-Fa-f]{6}"),
+)
+
+
+def redact_addresses(value: Any) -> Any:
+    """Replace anything address-shaped in any string, at any depth."""
+    if isinstance(value, dict):
+        return {key: redact_addresses(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [redact_addresses(item) for item in value]
+    if isinstance(value, str):
+        for pattern in _ADDRESS_SHAPED:
+            value = pattern.sub(REDACTED, value)
+    return value
 
 
 async def async_get_config_entry_diagnostics(
@@ -42,6 +89,12 @@ async def async_get_config_entry_diagnostics(
     every value under the device that published it. json.dumps renders an int
     key as bare decimal -- 1539, not 0x0603 -- which then has to be converted
     by hand before it lines up with anything else in the report.
+
+    Two passes of redaction, because they find different things. Key names
+    cover the config entry, where the keys are Home Assistant's own and known.
+    The address hunt covers everything, including the bus, where the keys are
+    the panel's vocabulary and an address arrives as the value of one that says
+    nothing about itself (#35).
     """
     coordinator = entry.runtime_data
     bus = coordinator.data
@@ -82,7 +135,7 @@ async def async_get_config_entry_diagnostics(
             # does not simply look empty.
             "unattributed": bus.unattributed,
         }
-    return {
+    return redact_addresses({
         "entry": async_redact_data(entry.as_dict(), TO_REDACT),
         "last_update_success": coordinator.last_update_success,
         # Which kind of address this host connects on ("identity" or "rpa"),
@@ -95,4 +148,4 @@ async def async_get_config_entry_diagnostics(
         # session on the other, which is the open question in issue #13.
         "session_transport": coordinator.session_transport,
         "bus": bus_dict,
-    }
+    })

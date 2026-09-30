@@ -131,6 +131,7 @@ GUARDED = (
     "test_passive_scan_discovery.py",
     "test_entry_teardown.py",
     "test_coordinator_state_flags.py",
+    "test_diagnostics_redaction.py",
 )
 
 # Bytes, die als Platzhalter durchgehen: doppelte Ziffern und doppelte
