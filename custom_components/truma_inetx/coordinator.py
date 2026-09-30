@@ -844,11 +844,13 @@ class TrumaCoordinator(DataUpdateCoordinator[Bus]):
                 connected = await self._connect_and_run()
             except Exception as exc:  # noqa: BLE001
                 LOGGER.debug("Truma session ended: %s", exc)
+                # First: an exception here ends ``_run``, so the older and
+                # essential bookkeeping goes ahead of the newer call.
+                self._note_attempt_failed()
                 # Before the ``finally`` below: _disconnect_client drops
                 # ``_client``, and the client is what says whether a GATT
                 # connection ever came up.
                 self._async_note_encryption_failure(exc)
-                self._note_attempt_failed()
             finally:
                 # Always tear the client down before the next attempt so a
                 # half-open link never lingers holding a connection slot (the

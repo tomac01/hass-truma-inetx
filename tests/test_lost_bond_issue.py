@@ -23,10 +23,13 @@ What it pins:
 6. any other kind of failure does not count, and breaks the run,
 7. the two issues are separate, in both directions: clearing either one leaves
    the other standing,
-8. every language file actually carries the text, it names the count it took
-   and it names the remedy -- a translation_key with nothing behind it shows
-   the user an empty card, and that is the very bug
-   ISSUE_NO_PROXY_ROUTE_LEGACY exists to clean up after,
+8. every language file actually carries the text and names the count it took
+   -- a translation_key with nothing behind it shows the user an empty card,
+   and that is the very bug ISSUE_NO_PROXY_ROUTE_LEGACY exists to clean up
+   after -- and the remedy survives in each of them, checked as structure:
+   strings.json and translations/en.json say the same, every file still has
+   all three numbered steps, and the German text keeps the outline of the
+   English one (paragraphs, and sentences in each),
 9. the two call sites are where the design says they are: counted before the
    client is torn down, cleared only after a subscribe has proved the key.
 
@@ -37,6 +40,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -58,6 +62,41 @@ UNBONDED = "GATT Error handle=35 error=5 Insufficient authentication"
 # of them whatever the threshold says.
 COUNT_WORDS = {2: ("twice", "zweimal"), 3: ("three times", "dreimal"),
                4: ("four times", "viermal")}
+
+SRC = Path(__file__).resolve().parents[1] / "custom_components" / "truma_inetx"
+STRINGS = SRC / "strings.json"
+EN = SRC / "translations" / "en.json"
+DE = SRC / "translations" / "de.json"
+
+# What the user does at the panel, in this order: delete the old entry, put the
+# panel into add-device mode, pair again. The order is the point -- pairing
+# before deleting is the one way to burn a slot.
+REMEDY_STEPS = [1, 2, 3]
+_STEP_LINE = re.compile(r"^(\d+)\. \S", re.MULTILINE)
+# A sentence ends at one of these before white space or the end of the
+# paragraph. The colon counts: where the English runs "... saves a slot. The
+# adapter ..." the German runs "... einen Platz: Der Adapter ...", and both are
+# one boundary.
+_SENTENCE_END = re.compile(r"[.:!?](?=\s|$)")
+
+
+def _issues(path: Path) -> dict:
+    return json.loads(path.read_text(encoding="utf-8"))["issues"]
+
+
+def _description(path: Path) -> str:
+    return _issues(path)[CONST.ISSUE_LOST_BOND]["description"]
+
+
+def _remedy_steps(description: str) -> list[int]:
+    """The numbers of the numbered lines, in the order they appear."""
+    return [int(n) for n in _STEP_LINE.findall(description)]
+
+
+def _outline(description: str) -> list[int]:
+    """Sentences in each paragraph: the shape of a text, without its wording."""
+    body = re.sub(r"^\d+\. ", "", description, flags=re.MULTILINE)
+    return [len(_SENTENCE_END.findall(para)) for para in body.split("\n\n")]
 
 
 class _IssueRegistry:
@@ -267,32 +306,73 @@ def test_the_two_issues_stay_apart() -> None:
 
 def test_every_language_has_the_text() -> None:
     """A raised issue with no text behind it is an empty card in Repairs."""
-    src = Path(__file__).resolve().parents[1] / "custom_components" / "truma_inetx"
     n = CONST.ENCRYPTION_FAILURES_BEFORE_WARNING
     assert n in COUNT_WORDS, (
         f"the texts spell the threshold out; add the word for {n} to "
         "COUNT_WORDS and to all three files"
     )
-    for path in (src / "strings.json", src / "translations" / "de.json",
-                 src / "translations" / "en.json"):
-        issues = json.loads(path.read_text(encoding="utf-8"))["issues"]
+    for path in (STRINGS, DE, EN):
+        issues = _issues(path)
         assert CONST.ISSUE_LOST_BOND in issues, f"{path.name} has no text"
         text = issues[CONST.ISSUE_LOST_BOND]
         assert text["title"].strip()
+        # The one thing a word can prove: how many refusals it took, which is
+        # the number the text has to keep in step with the constant. What the
+        # remedy says is checked as structure below -- the words for it
+        # ("delete", "slot") also occur in the closing paragraph, so a check on
+        # them stays green with the step itself gone.
         lower = text["description"].lower()
-        # The three things the text exists to say (REV-007). Checked by the
-        # threshold and by the two words of the remedy that cost a pairing
-        # slot when they are missing, not by the whole wording -- rephrasing
-        # is free, dropping the instruction is not.
         assert any(word in lower for word in COUNT_WORDS[n]), (
             f"{path.name} does not say how many refusals it took"
         )
-        assert "delete" in lower or "löschen" in lower, (
-            f"{path.name} never tells the user to delete the old entry first"
+
+
+def test_the_english_files_agree() -> None:
+    """strings.json and translations/en.json carry the same issue texts.
+
+    strings.json is the file a reviewer opens, translations/en.json the one
+    Home Assistant serves. They are one text; a hand edit that reaches only one
+    of them means what was reviewed is not what the user reads.
+    """
+    source, served = _issues(STRINGS), _issues(EN)
+    differing = sorted(k for k in source.keys() | served.keys()
+                       if source.get(k) != served.get(k))
+    assert not differing, (
+        f"strings.json and translations/en.json differ in: {differing}"
+    )
+
+
+def test_every_language_has_the_three_steps() -> None:
+    """The numbered steps are the instruction; each file must still carry all.
+
+    Counted as structure -- numbered lines 1, 2, 3 -- not searched for by word.
+    A step that is deleted, or deleted and the rest renumbered, changes the
+    count; a word check would not notice, because the words also occur in the
+    paragraph that explains the steps.
+    """
+    for path in (STRINGS, DE, EN):
+        steps = _remedy_steps(_description(path))
+        assert steps == REMEDY_STEPS, (
+            f"{path.name} has the remedy steps {steps}, expected {REMEDY_STEPS}"
         )
-        assert "slot" in lower or "platz" in lower or "plätze" in lower, (
-            f"{path.name} never says that deleting first costs no pairing slot"
-        )
+
+
+def test_german_keeps_the_outline_of_the_english() -> None:
+    """A sentence dropped from the German text does not show in the step count.
+
+    The closing paragraph -- deleting first costs nothing and saves a slot --
+    sits outside the numbered list, and the German has other words for
+    "delete" and "slot" further down. What a translation cannot lose without
+    losing a statement is a paragraph or a sentence, so German is held to the
+    outline of the English: same paragraphs, same number of sentences in each.
+    The cost is that a translator who splits or joins a sentence has to change
+    the English to match, or this fails.
+    """
+    english, german = _description(STRINGS), _description(DE)
+    assert _outline(german) == _outline(english), (
+        f"de.json has {_outline(german)} sentences per paragraph, "
+        f"the English has {_outline(english)}"
+    )
 
 
 def test_the_hooks_are_wired() -> None:

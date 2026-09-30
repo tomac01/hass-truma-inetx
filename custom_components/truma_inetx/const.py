@@ -83,9 +83,11 @@ NO_ROUTE_MISSES_BEFORE_WARNING = 3
 ISSUE_LOST_BOND = "lost_bond"
 # Consecutive such sessions before raising it. Same reasoning as
 # NO_ROUTE_MISSES_BEFORE_WARNING and the same number: one refusal can be the
-# tail of a session the panel was still tearing down. At a 300 s poll interval
-# three of them are a quarter of an hour -- against the 41 hours this fault
-# went unreported on 2026-09-28.
+# tail of a session the panel was still tearing down. A refused attempt is
+# paced by the reconnect backoff (15 s, then 30 s, capped at 45 s), not by the
+# poll interval, and on an ESPHome proxy it takes about a minute by itself (two
+# 30 s pairing timeouts, REV-007). Three of them come to roughly four to five
+# minutes -- against the 41 hours this fault went unreported on 2026-09-28.
 ENCRYPTION_FAILURES_BEFORE_WARNING = 3
 
 # The wording an "Insufficient encryption" refusal arrives with.
