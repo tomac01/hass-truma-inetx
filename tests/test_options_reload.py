@@ -28,7 +28,10 @@ Was der Test festnagelt:
    wenn der Listener danach noch einmal feuert,
 5. eine Adressaktualisierung wie aus der Discovery löst **keinen** aus,
 6. der Listener wird fürs Entladen vorgemerkt, damit ein Reload nicht bei
-   jedem Durchlauf einen weiteren Listener anhäuft.
+   jedem Durchlauf einen weiteren Listener anhäuft,
+7. ein Listener, der erst läuft, wenn der Entry schon entladen wird
+   (``runtime_data`` fehlt), kehrt still zurück, statt mit einem
+   ``AttributeError`` in einem Hintergrund-Task zu enden.
 
 Run: ``python3 tests/test_options_reload.py``
 """
@@ -228,6 +231,28 @@ def test_an_address_update_from_discovery_does_not_reload() -> None:
     hass, entry = _started({"poll_interval_seconds": 300})
 
     entry.data["address"] = "11:22:33:44:55:66"
+    _fire(hass, entry)
+
+    assert hass.config_entries.reloaded == [], hass.config_entries.reloaded
+
+
+def test_a_listener_that_runs_during_a_reload_returns_quietly() -> None:
+    """Zwei dicht aufeinander folgende Änderungen: der zweite Task kommt zu spät.
+
+    Home Assistant startet den Listener als eigenen Task. Läuft er erst,
+    während der Reload des ersten Aufrufs den Eintrag schon entladen hat,
+    ist ``runtime_data`` weg -- und ein Zugriff darauf wäre ein
+    ``AttributeError`` in einem Hintergrund-Task. Ein Reload ist dann ohnehin
+    unterwegs, es gibt nichts mehr zu tun.
+    """
+    hass, entry = _started({"poll_interval_seconds": 300})
+
+    entry.set_options({"poll_interval_seconds": 600})
+    # Beide Formen, in denen "weg" vorkommt: gelöscht (so entlädt Home
+    # Assistant) und auf None gesetzt.
+    del entry.runtime_data
+    _fire(hass, entry)
+    entry.runtime_data = None
     _fire(hass, entry)
 
     assert hass.config_entries.reloaded == [], hass.config_entries.reloaded

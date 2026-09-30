@@ -14,13 +14,16 @@ that is not this fault at all.
 What it pins:
 
 1. the classifier knows the measured wording and does NOT answer to the
-   unbonded error beside it,
+   unbonded error beside it, nor to the key-size error (ATT 0x0c) whose
+   wording contains ours,
 2. a run shorter than the threshold stays silent,
 3. the issue is raised exactly at the threshold and NOT re-raised afterwards,
 4. a successful session clears both the run and the issue,
 5. an attempt that never reached GATT does not count -- that is the no-route
    fault, with different advice,
-6. any other kind of failure does not count, and breaks the run,
+6. any other kind of failure does not count -- and does not break the run
+   either: only a subscribe that encrypted resets it, so a fault that comes
+   with a second error in between still reaches the threshold,
 7. the two issues are separate, in both directions: clearing either one leaves
    the other standing,
 8. every language file actually carries the text and names the count it took
@@ -31,7 +34,10 @@ What it pins:
    all three numbered steps, and the German text keeps the outline of the
    English one (paragraphs, and sentences in each),
 9. the two call sites are where the design says they are: counted before the
-   client is torn down, cleared only after a subscribe has proved the key.
+   client is torn down, cleared only after a subscribe has proved the key,
+10. a session that reached GATT and ended in an error nobody recognises is
+    logged as a warning with that error's text -- the one place a library's
+    changed wording shows up, since the classifier goes quiet on it.
 
 Run: ``python3 tests/test_lost_bond_issue.py``
 """
@@ -40,6 +46,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import logging
 import re
 import sys
 from pathlib import Path
@@ -55,6 +62,9 @@ REFUSED = "GATT Error handle=35 error=15 Insufficient encryption"
 # Its sibling, and deliberately NOT this fault: ATT 5 means the panel does not
 # know us, which ordinary pairing fixes.
 UNBONDED = "GATT Error handle=35 error=5 Insufficient authentication"
+# Its other neighbour: ATT 0x0c. The link is encrypted, the key is just too
+# short. Contains the words of REFUSED, and must not be taken for it.
+KEY_SIZE = "GATT Error handle=35 error=12 Insufficient Encryption Key Size"
 
 # The texts spell the threshold out in words rather than printing the constant,
 # so this is how the two are kept in step. Checking for the digit instead would
@@ -68,9 +78,12 @@ STRINGS = SRC / "strings.json"
 EN = SRC / "translations" / "en.json"
 DE = SRC / "translations" / "de.json"
 
-# What the user does at the panel, in this order: delete the old entry, put the
-# panel into add-device mode, pair again. The order is the point -- pairing
-# before deleting is the one way to burn a slot.
+# The remedy is three steps: delete the old entry, put the panel into
+# add-device mode, pair again -- in that order, since pairing before deleting
+# is the one way to burn a slot. This test checks only that the description has
+# numbered lines 1, 2, 3. It does not check what each step says or which one
+# comes first: swapping the contents of two steps keeps the numbers and stays
+# green, so the order of the actions is for whoever edits the text to hold.
 REMEDY_STEPS = [1, 2, 3]
 _STEP_LINE = re.compile(r"^(\d+)\. \S", re.MULTILINE)
 # A sentence ends at one of these before white space or the end of the
@@ -200,6 +213,29 @@ def test_classifier_knows_the_measured_wording() -> None:
     assert not CONST.is_encryption_failure(TimeoutError("timed out"))
 
 
+def test_the_key_size_refusal_is_not_this_fault() -> None:
+    """ATT 0x0c contains our wording and is a different fault.
+
+    "Insufficient Encryption Key Size" means the link is encrypted with a key
+    that is too short for the characteristic -- the bond is intact. Matching it
+    would tell the user to delete an entry that is working.
+    """
+    assert not CONST.is_encryption_failure(RuntimeError(KEY_SIZE))
+    assert not CONST.is_encryption_failure(RuntimeError(KEY_SIZE.upper()))
+    assert not CONST.is_encryption_failure(RuntimeError(KEY_SIZE.lower()))
+    # The measured wording must survive the exclusion.
+    assert CONST.is_encryption_failure(RuntimeError(REFUSED))
+
+    # And through the counter, not just the classifier: a run of these must
+    # not add up to the warning.
+    IR.__init__()
+    c = _Coord()
+    for _ in range(CONST.ENCRYPTION_FAILURES_BEFORE_WARNING * 3):
+        c._async_note_encryption_failure(RuntimeError(KEY_SIZE))
+    assert IR.creates == 0, "the key-size refusal raised the lost-bond issue"
+    assert c._encryption_failures == 0
+
+
 def test_debounced_warning() -> None:
     threshold = CONST.ENCRYPTION_FAILURES_BEFORE_WARNING
     assert threshold >= 2, "a threshold of 1 would warn on a single refusal"
@@ -267,15 +303,104 @@ def test_an_attempt_that_never_reached_gatt_does_not_count() -> None:
     assert c._encryption_failures == 0
 
 
-def test_another_kind_of_failure_breaks_the_run() -> None:
-    """Mixed failures are not this fault and must not add up to it."""
+def test_another_kind_of_failure_leaves_the_run_standing() -> None:
+    """An error nobody recognised is not evidence that the fault is gone.
+
+    One cycle produces several kinds of failure one after the other (REV-007),
+    and the fault lasts days. If any of them zeroed the counter, the notice
+    would need three refusals with nothing else between them, and one stray
+    timeout would start the count again. Only a subscribe that encrypted
+    proves the key; nothing else may reset the run.
+    """
+    threshold = CONST.ENCRYPTION_FAILURES_BEFORE_WARNING
+
     IR.__init__()
     c = _Coord()
-    _refuse(c, CONST.ENCRYPTION_FAILURES_BEFORE_WARNING - 1)
+    _refuse(c, threshold - 1)
     c._async_note_encryption_failure(TimeoutError("timed out waiting for ack"))
-    assert c._encryption_failures == 0, "an unrelated failure kept the run"
+    assert c._encryption_failures == threshold - 1, (
+        "an unrecognised failure reset the run"
+    )
+    assert KEY not in IR.active
     _refuse(c)
-    assert IR.creates == 0, "a broken run still reached the threshold"
+    assert KEY in IR.active, "the run did not survive the other failure"
+
+    # The same, with the failures interleaved the way a real cycle would.
+    IR.__init__()
+    c = _Coord()
+    for _ in range(threshold):
+        _refuse(c)
+        c._async_note_encryption_failure(TimeoutError("timed out waiting for ack"))
+    assert KEY in IR.active, "interleaved failures kept the notice from rising"
+
+    # Still the one thing that does reset it.
+    c._async_clear_encryption_failure()
+    assert c._encryption_failures == 0
+    assert KEY not in IR.active
+
+
+def _warnings_from(action) -> list[str]:
+    """Run ``action`` and return the messages it logged at WARNING or above."""
+
+    class _Records(logging.Handler):
+        def __init__(self) -> None:
+            super().__init__(logging.WARNING)
+            self.messages: list[str] = []
+
+        def emit(self, record: logging.LogRecord) -> None:
+            self.messages.append(record.getMessage())
+
+    handler = _Records()
+    CONST.LOGGER.addHandler(handler)
+    try:
+        action()
+    finally:
+        CONST.LOGGER.removeHandler(handler)
+    return handler.messages
+
+
+def test_an_unclassified_failure_after_gatt_is_logged() -> None:
+    """A session that reached the panel and died of something unknown says so.
+
+    If a library changes its wording, the classifier stops matching, the
+    counter stops counting, and the notice goes quiet again -- the very
+    failure it exists to end. The warning is what makes that visible, and the
+    text is what a person needs to fix the marker.
+    """
+    IR.__init__()
+    c = _Coord()
+    unknown = RuntimeError("Peer refused: encryption required (new wording)")
+    messages = _warnings_from(lambda: c._async_note_encryption_failure(unknown))
+    assert len(messages) == 1, messages
+    assert "new wording" in messages[0], messages[0]
+    assert PANEL in messages[0], messages[0]
+
+    # An exception with no message at all still has to say what it was.
+    messages = _warnings_from(
+        lambda: c._async_note_encryption_failure(TimeoutError())
+    )
+    assert len(messages) == 1 and "TimeoutError" in messages[0], messages
+
+
+def test_only_the_unclassified_case_logs_that_warning() -> None:
+    """No noise where the answer is known, or where nothing was reached."""
+    IR.__init__()
+    n = CONST.ENCRYPTION_FAILURES_BEFORE_WARNING
+
+    # A recognised refusal below the threshold: counted, quiet.
+    c = _Coord()
+    assert _warnings_from(lambda: _refuse(c, n - 1)) == []
+
+    # No GATT connection: that is the no-route fault's business.
+    c = _Coord(_no_link())
+    assert _warnings_from(
+        lambda: c._async_note_encryption_failure(RuntimeError("anything at all"))
+    ) == []
+    c = _Coord()
+    c._client = None
+    assert _warnings_from(
+        lambda: c._async_note_encryption_failure(RuntimeError("anything at all"))
+    ) == []
 
 
 def test_the_two_issues_stay_apart() -> None:

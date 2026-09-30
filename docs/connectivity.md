@@ -76,3 +76,19 @@ repeatedly, it raises an issue under Settings → **Repairs** saying so, rather
 than leaving the entities unavailable with no explanation. It stays quiet while
 the panel is switched off or out of range — not the same fault — and clears the
 issue on the next successful connect.
+
+The opposite fault has an issue of its own, "Home Assistant has lost its
+pairing key for the Truma panel". There the Bluetooth link *does* come up and
+the panel refuses to encrypt it (ATT error 15, "Insufficient encryption"),
+three sessions in a row. The panel sends that error only to a device it still
+holds a key for: the adapter or proxy that paired with it has lost its key
+while the panel still lists it, and nothing on the Home Assistant side can heal
+that. The issue sends you to the panel: delete the entry for that adapter or
+proxy from its list of paired devices, put it into add-device mode, pair again
+— in that order, since pairing over the old entry makes the panel append a
+second one instead of replacing it ([pairing](pairing.md)). Attempts that never
+got a link up do not count towards it; those belong to the issue above. Only a
+session that encrypts clears it. Any other failure in between neither counts
+nor resets the count, but one that reached the panel and ended in an error the
+integration does not recognise is logged as a warning with its text — if the
+refusal ever arrives in different words, that line is where it shows.

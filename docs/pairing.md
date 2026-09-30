@@ -49,7 +49,7 @@ attempt, since the panel only accepts a bond while its pairing screen is up:
    advertise a fresh Bluetooth address that pairs cleanly. Resolves most
    stubborn cases.
 
-You do **not** need to clear any bonds, on either side of the link. If a
+You do **not** need to clear a bond that only *this* side still holds. If a
 **proxy** still holds a bond the panel has forgotten, the panel rejects it on
 that one address only (`error: 97`), and the integration rotates to the panel's
 next address, which pairs normally. If **this host's own adapter** is the one
@@ -64,6 +64,18 @@ no proxy the connect and the bond were each waiting for the other: the BlueZ
 pairing agent was never reached at all, and pairing ran out its timeout
 re-dialling (#26). A connect that fails on every address the panel is
 advertising now hands over to BlueZ, which bonds over its own connection.
+
+The opposite case is different, and it does need a hand at the panel: the
+**panel** still lists an adapter or proxy as paired, but that adapter or proxy
+has lost its key. The link comes up and the panel refuses to encrypt it (ATT
+error 15, "Insufficient encryption"), and it will not pair afresh unless a
+person has put it into add-device mode, so nothing on the Home Assistant side
+can mend it. After three such refusals in a row Home Assistant says so under
+Settings → **Repairs** (see [Reaching the panel](connectivity.md)). Delete the
+entry for that adapter or proxy from the panel's list of paired devices
+**before** pairing again: pairing over it makes the panel append a second entry
+for the same address rather than replace the first (see
+[limitations](limitations.md)), and it has only about four slots.
 
 ## Where the bond lives
 

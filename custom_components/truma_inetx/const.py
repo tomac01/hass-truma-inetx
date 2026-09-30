@@ -106,8 +106,16 @@ ENCRYPTION_FAILURES_BEFORE_WARNING = 3
 # asymmetry is the entire evidence this issue rests on (REV-007).
 ENCRYPTION_FAILURE_MARKERS = ("insufficient encryption",)
 
+# Wordings that contain a marker above and are a different fault. ATT 0x0c
+# "Insufficient Encryption Key Size" means the link *is* encrypted, just with a
+# key that is too short for the characteristic -- the bond is intact. Matching
+# it would send the user to delete a working entry from the panel.
+ENCRYPTION_FAILURE_EXCLUSIONS = ("insufficient encryption key size",)
+
 
 def is_encryption_failure(exc: BaseException) -> bool:
     """Return True when this exception is the panel refusing to encrypt."""
     text = str(exc).lower()
+    if any(exclusion in text for exclusion in ENCRYPTION_FAILURE_EXCLUSIONS):
+        return False
     return any(marker in text for marker in ENCRYPTION_FAILURE_MARKERS)

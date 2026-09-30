@@ -89,8 +89,16 @@ async def _async_update_listener(hass: HomeAssistant, entry: TrumaConfigEntry) -
     Die Kopie wird *vor* dem Reload nachgezogen: ``async_reload`` ist ein
     ``await``, und ein zweiter Listener-Aufruf in diesem Fenster soll keinen
     zweiten Reload stapeln.
+
+    Fallen zwei Änderungen dicht hintereinander, läuft der zweite Aufruf als
+    eigener Task womöglich erst, wenn der Reload des ersten den Eintrag schon
+    entladen hat und ``runtime_data`` fort ist. Dann ist ein Reload ohnehin
+    unterwegs; der Aufruf kehrt still zurück, statt in einem Hintergrund-Task
+    an einem ``AttributeError`` zu enden.
     """
-    coordinator = entry.runtime_data
+    coordinator = getattr(entry, "runtime_data", None)
+    if coordinator is None:
+        return
     options = dict(entry.options)
     if options == coordinator.known_options:
         return

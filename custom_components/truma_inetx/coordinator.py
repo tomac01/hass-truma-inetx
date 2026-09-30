@@ -603,6 +603,20 @@ class TrumaCoordinator(DataUpdateCoordinator[Bus]):
           from ISSUE_NO_ROUTE, whose fault is "nothing can get near it" and
           whose advice is about adapters and range.
 
+        The run is broken by exactly one thing: a subscribe that encrypted
+        (``_async_clear_encryption_failure``). A session that reached GATT and
+        died of anything else leaves the count where it was -- one cycle
+        produces several kinds of failure (REV-007) and the fault lasts days,
+        so a run that any stray error could zero would keep starting over.
+
+        The count lives on this coordinator and every reload rebuilds it at
+        zero, so the notice can only rise reliably because an address update
+        no longer reloads the entry (the comparison in
+        ``__init__._async_update_listener``); whoever simplifies that
+        comparison makes it unreliable again, and the one test that would
+        object, test_options_reload.py, pins the behaviour but not this
+        reason.
+
         ``client.transport`` is the second gate. ``TrumaBleClient`` assigns its
         inner bleak client only once ``establish_connection`` has returned
         (ble.py:247), so a transport that is not ``None`` means a link was up.
@@ -617,9 +631,22 @@ class TrumaCoordinator(DataUpdateCoordinator[Bus]):
             # and the first real refusal trips the warning.
             return
         if not is_encryption_failure(exc):
-            # A run of mixed failures is not this fault, and must not add up
-            # to it.
-            self._encryption_failures = 0
+            # Reached GATT, ended in something we cannot name. The count stays
+            # where it is: this says nothing about whether the fault is gone
+            # (see the docstring), so neither counting nor resetting is right.
+            #
+            # It is logged because otherwise it vanishes. If a library changes
+            # the wording of the refusal, the classifier stops matching and
+            # this notice goes quiet again -- the very failure it exists to
+            # end. This warning is where that shows up, and it carries the
+            # text a person needs to correct the marker.
+            LOGGER.warning(
+                "Truma %s: session reached the panel and ended in an error "
+                "not recognised as an encryption refusal (%s: %s)",
+                self.unique_id,
+                type(exc).__name__,
+                exc,
+            )
             return
         self._encryption_failures += 1
         if self._encryption_failures != ENCRYPTION_FAILURES_BEFORE_WARNING:
