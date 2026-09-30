@@ -23,7 +23,7 @@ In YAML, if you would rather:
 
 ```yaml
 type: custom:truma-climate-dial-card
-entity: climate.truma_inetx_ffb4d1
+entity: climate.truma_inetx_bbccdd
 name: Heating          # optional
 ```
 

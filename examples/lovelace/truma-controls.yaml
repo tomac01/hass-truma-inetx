@@ -6,25 +6,25 @@ cards:
     heading_style: title
     badges:
       - type: entity
-        entity: binary_sensor.truma_inetx_ffb4d1_ble_sender_verbindung
+        entity: binary_sensor.truma_inetx_bbccdd_ble_sender_verbindung
         name: BLE-Sender
         show_name: true
         show_state: true
       - type: entity
-        entity: binary_sensor.truma_inetx_ffb4d1_ble_truma_verbindung
+        entity: binary_sensor.truma_inetx_bbccdd_ble_truma_verbindung
         name: BLE-Truma
         show_name: true
         show_state: true
       - type: entity
-        entity: binary_sensor.truma_inetx_ffb4d1_heizung
+        entity: binary_sensor.truma_inetx_bbccdd_heizung
         show_name: false
         show_state: true
 
   - type: custom:truma-operation-card
-    operation_entity: sensor.truma_inetx_ffb4d1_vorgang
+    operation_entity: sensor.truma_inetx_bbccdd_vorgang
 
   - type: tile
-    entity: number.truma_inetx_ffb4d1_live_modus_dauer
+    entity: number.truma_inetx_bbccdd_live_modus_dauer
     name: Live-Modus · Minuten
     icon: mdi:timer-cog-outline
     tap_action:
@@ -40,11 +40,11 @@ cards:
     square: false
     cards:
       - type: custom:truma-operation-card
-        operation_entity: sensor.truma_inetx_ffb4d1_vorgang
+        operation_entity: sensor.truma_inetx_bbccdd_vorgang
         action: sync
         card:
           type: button
-          entity: button.truma_inetx_ffb4d1_jetzt_synchronisieren_live_modus_starten
+          entity: button.truma_inetx_bbccdd_jetzt_synchronisieren_live_modus_starten
           name: Jetzt synchronisieren
           icon: mdi:bluetooth-connect
           show_state: false
@@ -52,12 +52,12 @@ cards:
             action: perform-action
             perform_action: button.press
             target:
-              entity_id: button.truma_inetx_ffb4d1_jetzt_synchronisieren_live_modus_starten
+              entity_id: button.truma_inetx_bbccdd_jetzt_synchronisieren_live_modus_starten
           hold_action:
             action: none
 
       - type: button
-        entity: button.truma_inetx_ffb4d1_live_modus_beenden
+        entity: button.truma_inetx_bbccdd_live_modus_beenden
         name: Live-Modus beenden
         icon: mdi:bluetooth-off
         show_state: false
@@ -65,7 +65,7 @@ cards:
           action: perform-action
           perform_action: button.press
           target:
-            entity_id: button.truma_inetx_ffb4d1_live_modus_beenden
+            entity_id: button.truma_inetx_bbccdd_live_modus_beenden
         hold_action:
           action: none
 
@@ -76,15 +76,15 @@ cards:
       wählen → Solltemperatur einstellen.
 
   - type: custom:truma-operation-card
-    operation_entity: sensor.truma_inetx_ffb4d1_vorgang
+    operation_entity: sensor.truma_inetx_bbccdd_vorgang
     action: [hvac_mode, temperature, fan_level]
     card:
       type: custom:truma-climate-dial-card
-      entity: climate.truma_inetx_ffb4d1
+      entity: climate.truma_inetx_bbccdd
       name: Raumheizung
 
   - type: tile
-    entity: select.truma_inetx_ffb4d1_water_heating
+    entity: select.truma_inetx_bbccdd_water_heating
     name: Warmwasser
     icon: mdi:water-boiler
     tap_action:
@@ -95,11 +95,11 @@ cards:
       - type: select-options
 
   - type: custom:truma-operation-card
-    operation_entity: sensor.truma_inetx_ffb4d1_vorgang
+    operation_entity: sensor.truma_inetx_bbccdd_vorgang
     action: energy_source
     card:
       type: tile
-      entity: select.truma_inetx_ffb4d1_energiequelle
+      entity: select.truma_inetx_bbccdd_energiequelle
       name: Energiequelle
       icon: mdi:engine
       tap_action:
@@ -110,7 +110,7 @@ cards:
         - type: select-options
 
   - type: tile
-    entity: select.truma_inetx_ffb4d1_elektrische_heizung
+    entity: select.truma_inetx_bbccdd_elektrische_heizung
     name: Elektrische Heizung
     icon: mdi:flash
     tap_action:
@@ -121,7 +121,7 @@ cards:
       - type: select-options
 
   - type: tile
-    entity: number.truma_inetx_ffb4d1_fan_level
+    entity: number.truma_inetx_bbccdd_fan_level
     name: Lüfterstufe
     icon: mdi:fan
     tap_action:
@@ -133,7 +133,7 @@ cards:
         style: buttons
     visibility:
       - condition: state
-        entity: climate.truma_inetx_ffb4d1
+        entity: climate.truma_inetx_bbccdd
         state: fan_only
 
   - type: grid
@@ -141,7 +141,7 @@ cards:
     square: false
     cards:
       - type: tile
-        entity: sensor.truma_inetx_ffb4d1_room_temperature
+        entity: sensor.truma_inetx_bbccdd_room_temperature
         name: Innen
         icon: mdi:home-thermometer-outline
         tap_action:
@@ -150,7 +150,7 @@ cards:
           action: more-info
 
       - type: tile
-        entity: sensor.truma_inetx_ffb4d1_water_temperature
+        entity: sensor.truma_inetx_bbccdd_water_temperature
         name: Boiler
         icon: mdi:thermometer-water
         tap_action:

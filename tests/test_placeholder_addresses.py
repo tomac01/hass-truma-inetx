@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Prüft, ob die Tests nur erfundene Adressen nennen.
+"""Prüft, ob Tests und ausgelieferte Dateien nur erfundene Adressen nennen.
 
 Warum das hier steht: Dieses Repository ist öffentlich. Eine Adresse, die
 ein Test aus einem echten Aufbau übernimmt, ist nach einem Push dauerhaft in
@@ -29,7 +29,12 @@ Was der Test festnagelt:
    einem Kommentar oder Docstring steht nach einem Push genauso öffentlich da
    wie einer im Code,
 2. die aufgeführten Dateien gibt es überhaupt -- eine umbenannte Datei soll
-   die Prüfung nicht stillschweigend leerlaufen lassen.
+   die Prüfung nicht stillschweigend leerlaufen lassen,
+3. in ``custom_components/`` (samt der Karte in ``.js``), ``docs/`` und
+   ``examples/`` trägt jeder Entity-ID-Präfix der Form ``truma_inetx_XXXXXX``
+   einen Suffix aus drei doppelten Zeichenpaaren wie ``bbccdd``, gleich in
+   welcher Schreibung -- und diese drei Bäume gibt es, samt je einer
+   Stichprobe, damit auch diese Prüfung nicht leerläuft.
 
 Warum nicht das ganze Verzeichnis: Mehrere ältere Testdateien führen weiterhin
 Adressen, die dieser Regel nicht genügen. Jede einzelne umzustellen kostet
@@ -72,6 +77,19 @@ die Adressen derselben Datei mit -- ``bt.address_kind`` erkennt eine
 Identitätsadresse ausschließlich daran, dass der Name auf ihre letzten sechs
 Hexzeichen endet, und ein allein geänderter Suffix macht den Test am falschen
 Ende grün.
+
+Eine Form dieses Suffixes sieht er seit dem 2026-09-30 doch: den
+Entity-ID-Präfix. Home Assistant bildet ihn aus dem Gerätenamen -- aus
+``Truma iNetX-BBCCDD`` wird ``truma_inetx_bbccdd`` --, er trägt also dieselben
+sechs Hexzeichen. In Karte, Doku und Beispielen stand bis dahin der Präfix
+eines fremden Panels, übernommen aus dem Original-Repo; kein Test hatte ihn
+gesehen, weil die Prüfung oben nur Testdateien liest und nur Bytepaare mit
+Trennzeichen kennt. Diese Prüfung (Punkt 3) liest ganze Bäume statt einer
+Liste: Anders als in den Testdateien braucht dort kein Präfix eine bestimmte
+Form, er ist nur ein Name, den der Leser durch seinen eigenen ersetzt. Den
+Gerätenamen in der Form ``Truma iNetX-XXXXXX`` prüft sie nicht, und ein
+Entity-Name aus genau sechs Hexbuchstaben direkt hinter ``truma_inetx_``
+(``decade``, ``facade``) schlüge an -- beides gibt es dort heute nicht.
 
 Und umgekehrt: Eine Uhrzeit der Form ``HH:MM:SS`` ist von drei Bytepaaren
 nicht zu unterscheiden und schlägt hier an. Das ist kein Fehlalarm, den man
@@ -134,6 +152,18 @@ ADDRESS = re.compile(
     r"|\b(?:[0-9A-Fa-f]{2}-){5}[0-9A-Fa-f]{2}\b"
 )
 
+# Wo der Entity-Präfix geprüft wird: alles, was an Nutzer geht oder sie
+# anleitet. Ganze Bäume statt einer Liste, damit eine neue Datei ohne
+# Nachtrag mitgeprüft wird.
+ROOT = TESTS.parent
+PREFIX_TREES = ("custom_components", "docs", "examples")
+
+# Der Entity-ID-Präfix eines Panels, ``truma_inetx_`` und sechs Hexzeichen.
+# Danach darf weder Buchstabe noch Ziffer folgen, wohl aber ``_`` und der Name
+# der Entität (``..._bbccdd_vorgang``) -- deshalb eine Vorausschau statt einer
+# Wortgrenze, die zwischen zwei Wortzeichen wie ``d`` und ``_`` nicht greift.
+ENTITY_PREFIX = re.compile(r"truma_inetx_([0-9a-f]{6})(?![0-9a-z])", re.IGNORECASE)
+
 
 def _offenders(text: str) -> list[tuple[int, str]]:
     """Alle Adressen im Text, die keine Platzhalter-Bytes führen."""
@@ -144,6 +174,30 @@ def _offenders(text: str) -> list[tuple[int, str]]:
             if not all(octet in PLACEHOLDER_BYTES for octet in octets):
                 found.append((number, match.group(0)))
     return found
+
+
+def _prefix_offenders(text: str) -> list[tuple[int, str]]:
+    """Alle Entity-Präfixe im Text, deren Suffix kein Platzhalter ist."""
+    found = []
+    for number, line in enumerate(text.splitlines(), start=1):
+        for match in ENTITY_PREFIX.finditer(line):
+            suffix = match.group(1).upper()
+            pairs = (suffix[0:2], suffix[2:4], suffix[4:6])
+            if not all(pair in PLACEHOLDER_BYTES for pair in pairs):
+                found.append((number, match.group(0)))
+    return found
+
+
+def _prefix_files() -> list[Path]:
+    """Jede Datei der geprüften Bäume, ohne Pythons Bytecode-Ablage."""
+    files: list[Path] = []
+    for tree in PREFIX_TREES:
+        files += sorted(
+            path
+            for path in (ROOT / tree).rglob("*")
+            if path.is_file() and "__pycache__" not in path.parts
+        )
+    return files
 
 
 def test_the_guarded_files_exist() -> None:
@@ -162,6 +216,56 @@ def test_guarded_tests_name_only_placeholder_addresses() -> None:
             + " -- erwartet werden Bytes aus "
             + " ".join(sorted(PLACEHOLDER_BYTES))
         )
+
+
+def test_the_prefix_trees_exist() -> None:
+    """Ein umbenannter Baum darf die Präfixprüfung nicht leerlaufen lassen."""
+    for tree in PREFIX_TREES:
+        assert (ROOT / tree).is_dir(), f"{tree}/ steht auf der Liste, fehlt aber"
+    scanned = {path.relative_to(ROOT).as_posix() for path in _prefix_files()}
+    # Je eine Stichprobe, darunter die Karte: Sie geht als ``.js`` an Nutzer,
+    # und eine Prüfung, die nur Python läse, ginge an ihr vorbei.
+    for name in (
+        "custom_components/truma_inetx/frontend/truma-climate-dial-card.js",
+        "docs/card.md",
+        "examples/lovelace/truma-controls.yaml",
+    ):
+        assert name in scanned, f"{name} wird nicht mitgeprüft"
+
+
+def test_shipped_files_name_only_placeholder_prefixes() -> None:
+    """Kein Entity-Präfix eines echten Panels in Code, Karte, Doku, Beispielen."""
+    failures = []
+    for path in _prefix_files():
+        # Auch Bilder gehen durch: ein SVG ist Text, und ob eine Datei Text
+        # ist, soll nicht ihre Endung entscheiden. Was nicht UTF-8 ist, wird
+        # ersetzt statt übersprungen.
+        text = path.read_bytes().decode("utf-8", errors="replace")
+        for number, _ in _prefix_offenders(text):
+            failures.append(f"{path.relative_to(ROOT).as_posix()} Zeile {number}")
+    assert not failures, (
+        "Entity-Präfix, dessen Suffix kein Platzhalter ist: "
+        + ", ".join(failures)
+        + " -- erwartet wird ``truma_inetx_`` mit drei doppelten Zeichenpaaren,"
+        " etwa ``truma_inetx_bbccdd``"
+    )
+
+
+def test_the_prefix_rule_would_notice_a_real_suffix() -> None:
+    """Die Präfixregel selbst: Platzhalter bestehen, alles andere fällt durch."""
+    assert _prefix_offenders("entity: climate.truma_inetx_bbccdd") == []
+    assert _prefix_offenders("sensor.truma_inetx_BBCCDD_vorgang") == []
+    assert _prefix_offenders("sensor.truma_inetx_556677_vorgang") == []
+    # Der Domänenname allein, und ein Name ohne sechs Hexzeichen dahinter.
+    assert _prefix_offenders("custom_components/truma_inetx/card.js") == []
+    assert _prefix_offenders("tools/truma_inetx_bus_dump.py") == []
+    assert _prefix_offenders("climate.truma_inetx_a1b2c3") == [(1, "truma_inetx_a1b2c3")]
+    # Groß geschrieben, und mit dem Namen der Entität dahinter.
+    assert _prefix_offenders("button.TRUMA_INETX_A1B2C3_live") == [
+        (1, "TRUMA_INETX_A1B2C3")
+    ]
+    # Zwei doppelte Paare reichen nicht, es müssen alle drei sein.
+    assert _prefix_offenders("x: truma_inetx_bbccd1") == [(1, "truma_inetx_bbccd1")]
 
 
 def test_the_rule_would_notice_a_real_address() -> None:
