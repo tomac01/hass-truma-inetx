@@ -51,7 +51,11 @@ Was die Datei festnagelt:
     ein laufender Befehl oder Lesevorgang nicht; der Reload folgt frühestens
     30 s nach dem Ende des Abbaus -- auch eines gescheiterten Versuchs --, ein
     wartender Befehl wird vorher noch bedient, und ein Stop in dieser Pause
-    verhindert ihn, ohne dass das Entladen hängt (REV-007).
+    verhindert ihn, ohne dass das Entladen hängt (REV-007),
+10. nach *jedem* Reload -- auch aus dem Menü oder nach dem Umschalten einer
+    Entität, die Home Assistant ohne Rückfrage ausführt -- wählt der neue
+    Coordinator frühestens 30 s nach dem Ende der letzten Sitzung an; ein
+    übernommener Pairing-Link wartet nicht, ein Stop in der Pause bricht ab.
 
 Run: ``python3 tests/test_coordinator_state_flags.py``
 """
@@ -1657,6 +1661,193 @@ def test_a_waiting_request_right_after_a_session_goes_first_without_the_settle()
         assert reloads.scheduled == [("01", attempts[1] + 20 + 30.0)], (
             f"{kind}: {reloads.scheduled}"
         )
+
+
+
+# -- Abstand nach jedem Reload (REV-007) -----------------------------------
+
+
+def _session_then_stop(coord: _Coord, *, length: float = 20.0) -> list[float]:
+    """Eine Sitzung fahren und die Schleife danach anhalten; liefert ihr Ende."""
+    ended: list[float] = []
+
+    async def _connect_and_run() -> bool:
+        await _yield()
+        coord.clock.now += length
+        ended.append(coord.clock.now)
+        return True
+
+    async def _wait_before_retry(_delay: float) -> None:
+        coord._stop = True
+
+    coord._connect_and_run = _connect_and_run
+    coord._wait_before_retry = _wait_before_retry
+    _run_bounded(coord)
+    return ended
+
+
+def _reloaded(old: _Coord) -> _Coord:
+    """Den Coordinator bauen, den ein Reload an die Stelle von ``old`` setzt.
+
+    Derselbe Home Assistant, derselbe Entry, dieselbe Uhr -- ein neuer
+    Coordinator. Genau das bleibt über einen Reload erhalten, und nur darüber
+    kann der neue vom Sitzungsende des alten wissen.
+    """
+    new = _Coord(old.hass, old.config_entry, ADDRESS)
+    old.config_entry.runtime_data = new
+    COORD.asyncio = _FastForward(old.clock, new)
+    return new
+
+
+def _first_dial(coord: _Coord) -> tuple[list[float], list[float]]:
+    """``_run`` des neuen Coordinators bis zum ersten Anwahlversuch fahren."""
+    settles = _settle_stub(coord)
+    attempts: list[float] = []
+
+    async def _connect_and_run() -> bool:
+        attempts.append(coord.clock.now)
+        await _yield()
+        coord._stop = True
+        return True
+
+    coord._connect_and_run = _connect_and_run
+    _run_bounded(coord)
+    return attempts, settles
+
+
+def test_after_a_reload_the_first_dial_keeps_its_distance() -> None:
+    """4 s nach dem Abbau neu anwählen ist genau das, was am 30.09. scheiterte.
+
+    Der Reload aus dem Menü oder nach dem Umschalten einer Entität kommt von
+    Home Assistant, nicht von uns -- aufschieben lässt er sich nicht. Was sich
+    verhindern lässt, ist der sofortige Neuaufbau danach.
+    """
+    old = _make_coord(poll_interval=300)
+    ended = _session_then_stop(old)
+    old.clock.now += 4
+
+    new = _reloaded(old)
+    attempts, settles = _first_dial(new)
+
+    assert settles == [26.0], settles
+    assert attempts == [ended[0] + 30.0], attempts
+
+
+def test_after_a_reload_long_after_the_session_nothing_waits() -> None:
+    """Liegt das Sitzungsende 30 s oder mehr zurück, wird sofort angewählt.
+
+    30 s genau ist der Fall nach einem aufgeschobenen Options-Reload: der kam
+    selbst schon 30 s nach dem Sitzungsende und soll nicht noch einmal warten.
+    """
+    for gap in (30.0, 120.0):
+        old = _make_coord(poll_interval=300)
+        _session_then_stop(old)
+        old.clock.now += gap
+        now = old.clock.now
+
+        new = _reloaded(old)
+        attempts, settles = _first_dial(new)
+
+        assert settles == [], f"gap={gap}: {settles}"
+        assert attempts == [now], f"gap={gap}: {attempts}"
+
+
+def test_a_first_setup_does_not_wait() -> None:
+    """Ohne vorherige Sitzung desselben Entries gibt es keinen Abstand zu halten."""
+    coord = _make_coord(poll_interval=300)
+    now = coord.clock.now
+    attempts, settles = _first_dial(coord)
+
+    assert settles == [], settles
+    assert attempts == [now], attempts
+
+
+def test_a_handed_off_pairing_link_is_adopted_at_once() -> None:
+    """Der übergebene Pairing-Link ist keine neue Anwahl -- er darf nicht warten.
+
+    Ein Link, den niemand hält, fällt; 30 s Pause kosteten die frische
+    Kopplung ihre Übernahme.
+    """
+    old = _make_coord(poll_interval=300)
+    _session_then_stop(old)
+    old.clock.now += 4
+    now = old.clock.now
+
+    new = _reloaded(old)
+    new._initial_client = _Client()
+    attempts, settles = _first_dial(new)
+
+    assert settles == [], settles
+    assert attempts == [now], attempts
+
+
+def test_a_stop_during_the_distance_dials_nothing() -> None:
+    """Wird der neue Entry in der Pause gleich wieder entladen, bleibt es still."""
+    old = _make_coord(poll_interval=300)
+    _session_then_stop(old)
+
+    new = _reloaded(old)
+    attempts: list[float] = []
+
+    async def _wait_for_stop(delay: float) -> None:
+        new.clock.now += 1
+        new._stop = True
+
+    async def _connect_and_run() -> bool:
+        attempts.append(new.clock.now)
+        return True
+
+    new._wait_for_stop = _wait_for_stop
+    new._connect_and_run = _connect_and_run
+    _run_bounded(new)
+
+    assert attempts == [], attempts
+
+
+def test_a_stop_that_cut_an_attempt_records_its_end() -> None:
+    """Brach das Entladen einen Versuch ab, vermerkt der Stop dessen Ende selbst.
+
+    Der Versuch kam dann nicht mehr dazu -- und ohne Vermerk wählte der neue
+    Coordinator sofort an, auf einen Link, der eben erst abgerissen ist.
+    """
+    old = _make_coord(poll_interval=300)
+    old._attempt_running = True
+    old.clock.now += 50
+    stopped_at = old.clock.now
+    asyncio.run(old.async_stop())
+
+    new = _reloaded(old)
+    attempts, settles = _first_dial(new)
+
+    assert settles == [30.0], settles
+    assert attempts == [stopped_at + 30.0], attempts
+
+
+
+def test_the_loop_marks_an_attempt_while_it_runs() -> None:
+    """Während eines Versuchs steht die Marke, danach nicht mehr.
+
+    Von ihr hängt ab, ob ein Stop das Ende eines abgeschnittenen Versuchs
+    vermerkt (``test_a_stop_that_cut_an_attempt_records_its_end``). Setzte die
+    Schleife sie nie, bliebe jener Test grün und der Vermerk trotzdem aus.
+    """
+    coord = _make_coord(poll_interval=300)
+    seen: list[bool] = []
+
+    async def _connect_and_run() -> bool:
+        seen.append(coord._attempt_running)
+        await _yield()
+        return True
+
+    async def _wait_before_retry(_delay: float) -> None:
+        seen.append(coord._attempt_running)
+        coord._stop = True
+
+    coord._connect_and_run = _connect_and_run
+    coord._wait_before_retry = _wait_before_retry
+    _run_bounded(coord)
+
+    assert seen == [True, False], seen
 
 
 if __name__ == "__main__":

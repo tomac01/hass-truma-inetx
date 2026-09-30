@@ -99,7 +99,13 @@ class _Coord:
         self._client: _Link | None = None
         self._initial_client = initial
         self._session_task: asyncio.Task | None = None
+        self._attempt_running = False
+        self.session_end_noted = False
         self.log: list[str] = []
+
+    def _note_session_end(self) -> None:
+        """Steht für den Vermerk in ``hass.data``; den prüft eine andere Datei."""
+        self.session_end_noted = True
 
     async_stop = COORD.TrumaCoordinator.async_stop
     _stop_session_task = COORD.TrumaCoordinator._stop_session_task

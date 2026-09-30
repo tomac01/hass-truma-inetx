@@ -256,6 +256,13 @@ class _RunCoord:
     def _note_attempt_failed(self) -> None:
         pass
 
+    def _note_session_end(self) -> None:
+        pass
+
+    async def _keep_distance_after_reload(self) -> None:
+        # Den Abstand nach einem Reload prüft test_coordinator_state_flags.py.
+        pass
+
     async def _wait_before_retry(self, delay: float) -> None:
         self.delays.append(delay)
         self.clock.now += delay

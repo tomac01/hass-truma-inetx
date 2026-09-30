@@ -134,6 +134,9 @@ _SESSION_EXIT_TIMEOUT = 5.0  # seconds
 # sauberen Trennen und einer neuen Verbindung, der auf dem Fahrzeug gemessen
 # gelungen ist -- kein Rechenwert, eine Beobachtung.
 _RELOAD_SETTLE_SECONDS = 30.0
+# Unter diesem Schlüssel in ``hass.data[DOMAIN]`` überlebt das Ende der letzten
+# Sitzung eines Entries dessen Reload: Entry-ID -> ``hass.loop.time()``.
+_SESSION_ENDS = "session_ended_at"
 _STORAGE_VERSION = 1
 
 # How often to ask the on-demand sensors for a fresh measurement while the
@@ -285,6 +288,9 @@ class TrumaCoordinator(DataUpdateCoordinator[Bus]):
         # und wann die letzte Sitzung endete -- der Reload hält Abstand dazu.
         self._reload_pending = False
         self._session_ended_at: float | None = None
+        # Ein Anwahlversuch läuft; bleibt es nach einem Stop stehen, hat der
+        # Stop den Versuch abgeschnitten, bevor der sein Ende vermerken konnte.
+        self._attempt_running = False
         # Ein Rückmeldungsbuch je laufendem Schreibvorgang, unter dessen
         # Vorgangs-Token: Token -> {(addr, topic, param): Wert}. Eines je
         # Vorgang und nicht eines für alle, weil Home Assistant Service-Aufrufe
@@ -764,7 +770,12 @@ class TrumaCoordinator(DataUpdateCoordinator[Bus]):
         self._stop_event.set()
         await self._stop_session_task()
         await self._disconnect_client()
+        released = self._initial_client is not None
         await self._release_initial_client()
+        if self._attempt_running or released:
+            # Ein Link endete erst hier. Vermerkt, damit der Coordinator, den
+            # ein Reload an unsere Stelle setzt, Abstand dazu hält.
+            self._note_session_end()
 
     async def _stop_session_task(self) -> None:
         """End the background session, cancelling it if it will not end.
@@ -919,6 +930,7 @@ class TrumaCoordinator(DataUpdateCoordinator[Bus]):
     async def _run(self) -> None:
         """Maintain the BLE session, reconnecting with exponential backoff."""
         delay = _RECONNECT_DELAY_BASE
+        await self._keep_distance_after_reload()
         while not self._stop:
             if self._reload_pending and not self._session_wanted:
                 # Hier und nicht mitten in einem Versuch: am Schleifenkopf ist
@@ -933,6 +945,7 @@ class TrumaCoordinator(DataUpdateCoordinator[Bus]):
             # Pause durchzudrehen.
             self._manual_wake_pending = False
             connected = False
+            self._attempt_running = True
             try:
                 connected = await self._connect_and_run()
             except Exception as exc:  # noqa: BLE001
@@ -952,7 +965,8 @@ class TrumaCoordinator(DataUpdateCoordinator[Bus]):
                 # und zwar vor seinem eigenen ``await`` -- hier nachträglich
                 # zu löschen kam zu spät (siehe dort).
                 await self._disconnect_client()
-                self._session_ended_at = self.hass.loop.time()
+                self._note_session_end()
+                self._attempt_running = False
             if connected and self.poll_interval and not self._stop:
                 # Poll mode: the link going away is the plan, not a fault. The
                 # reading we just took is still the current state, so leave the
@@ -1031,6 +1045,50 @@ class TrumaCoordinator(DataUpdateCoordinator[Bus]):
         finally:
             stop.cancel()
             wake.cancel()
+
+    def _note_session_end(self) -> None:
+        """Das Ende einer Sitzung vermerken -- auch für den Coordinator danach.
+
+        Neben dem eigenen Feld landet es in ``hass.data``: Das überlebt einen
+        Reload, der Coordinator nicht. Nur so weiß der nächste, wie lange der
+        letzte Link her ist (``_keep_distance_after_reload``).
+        """
+        now = self.hass.loop.time()
+        self._session_ended_at = now
+        ends = self.hass.data.setdefault(DOMAIN, {}).setdefault(_SESSION_ENDS, {})
+        ends[self.config_entry.entry_id] = now
+
+    async def _keep_distance_after_reload(self) -> None:
+        """Vor der ersten Anwahl Abstand zur letzten Sitzung dieses Entries halten.
+
+        Den Options-Reload schiebt ``async_request_reload`` auf, aber nicht
+        jeder Reload kommt von uns: Home Assistant lädt neu, wenn jemand im
+        Menü auf „Neu laden" drückt oder eine Entität ein- oder ausschaltet --
+        auch mitten in einer Sitzung. Aufhalten lässt sich das nicht. Was sich
+        verhindern lässt, ist der sofortige Neuaufbau danach: am 30.09.2026 kam
+        er 4 s nach dem Abbau, und das Panel nahm bis zum Stromlosmachen keine
+        Verbindung mehr an (REV-007). Also frühestens
+        ``_RELOAD_SETTLE_SECONDS`` nach dem Ende der letzten Sitzung anwählen.
+
+        Ein übergebener Pairing-Link wartet nicht: er ist keine neue Anwahl,
+        und ein Link, den niemand hält, fällt. Ein Stop beendet die Pause; die
+        Schleife danach fängt dann gar nicht erst an.
+        """
+        ends = self.hass.data.get(DOMAIN, {}).get(_SESSION_ENDS, {})
+        ended = ends.get(self.config_entry.entry_id)
+        if ended is None or self._initial_client is not None:
+            return
+        self._session_ended_at = ended
+        remaining = ended + _RELOAD_SETTLE_SECONDS - self.hass.loop.time()
+        if remaining > 0:
+            LOGGER.info(
+                "Truma %s: the last BLE session ended %.0fs ago; waiting %.0fs "
+                "before dialling again",
+                self.unique_id,
+                _RELOAD_SETTLE_SECONDS - remaining,
+                remaining,
+            )
+            await self._wait_for_stop(remaining)
 
     async def _wait_for_stop(self, delay: float) -> None:
         """Bis zu ``delay`` Sekunden warten; nur ein Stop beendet das früher.
