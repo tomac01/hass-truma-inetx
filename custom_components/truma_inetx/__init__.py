@@ -110,7 +110,11 @@ async def _async_update_listener(hass: HomeAssistant, entry: TrumaConfigEntry) -
     if options == coordinator.known_options:
         return
     coordinator.known_options = options
-    if coordinator.session_running:
+    # Auch mit bereits bestelltem Reload: Zwischen dem Ende der Schleife und
+    # dem Abschluss des Entladens läuft keine Sitzung mehr, der bestellte
+    # Reload liest die neuen Optionen aber ohnehin -- ein zweiter hier träfe
+    # den frisch aufgesetzten Entry mitten in seinem ersten Verbindungsaufbau.
+    if coordinator.session_running or coordinator.reload_pending:
         coordinator.async_request_reload()
         return
     await hass.config_entries.async_reload(entry.entry_id)

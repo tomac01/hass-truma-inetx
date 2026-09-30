@@ -691,6 +691,18 @@ class TrumaCoordinator(DataUpdateCoordinator[Bus]):
         task = self._session_task
         return task is not None and not task.done()
 
+    @property
+    def reload_pending(self) -> bool:
+        """Ob eine geänderte Option noch auf ihren Reload wartet."""
+        return self._reload_pending
+
+    @property
+    def _session_wanted(self) -> bool:
+        """Ob ein Befehl oder eine Live-Anfrage auf einen Link wartet."""
+        return bool(
+            self._writes_pending or self._manual_requests or self._manual_wake_pending
+        )
+
     @callback
     def async_request_reload(self) -> None:
         """Den Entry neu laden, aber erst, wenn keine Sitzung mehr läuft.
@@ -704,6 +716,12 @@ class TrumaCoordinator(DataUpdateCoordinator[Bus]):
         ``_RELOAD_SETTLE_SECONDS`` nach ihrem Ende. Der Weck-Impuls beendet die
         Pause zwischen zwei Polls, damit die Option nicht bis zum nächsten Poll
         wartet.
+
+        Befehle und Live-Anfragen gehen überall vor: Wartet einer auf einen
+        Link, wird er zuerst bedient, und der Reload folgt nach dieser Sitzung.
+        Kommt der Wunsch während eines Verbindungsaufbaus, läuft der Aufbau
+        samt Startup zu Ende und wird dann getrennt -- ein Zyklus mehr am
+        Panel, aber kein Abbruch mitten im Aufbau.
         """
         if not self._reload_pending:
             LOGGER.info(
@@ -902,11 +920,13 @@ class TrumaCoordinator(DataUpdateCoordinator[Bus]):
         """Maintain the BLE session, reconnecting with exponential backoff."""
         delay = _RECONNECT_DELAY_BASE
         while not self._stop:
-            if self._reload_pending:
+            if self._reload_pending and not self._session_wanted:
                 # Hier und nicht mitten in einem Versuch: am Schleifenkopf ist
-                # kein Link offen und keiner im Aufbau.
-                await self._hand_over_to_reload()
-                return
+                # kein Link offen und keiner im Aufbau. Wartet ein Befehl auf
+                # einen Link, geht er vor -- sonst liefe er ins Timeout seines
+                # Coordinators, den der Reload gleich abbaut.
+                if await self._hand_over_to_reload():
+                    return
             # Nur den Weck-Impuls verbrauchen. Die gewünschte Dauer bleibt
             # offen, bis der Startup gelungen ist -- ein gescheiterter Anwahl-
             # versuch muss aber trotzdem den Backoff respektieren, statt ohne
@@ -1025,11 +1045,14 @@ class TrumaCoordinator(DataUpdateCoordinator[Bus]):
         finally:
             stop.cancel()
 
-    async def _hand_over_to_reload(self) -> None:
+    async def _hand_over_to_reload(self) -> bool:
         """Nach der Pause den Reload anstoßen, den eine Optionsänderung wollte.
 
-        Die Schleife endet danach; den Entry baut Home Assistant neu auf. Ein
-        Stop in der Pause -- Entladen, Herunterfahren -- verhindert den Reload.
+        ``True`` heißt: die Schleife endet -- der Reload ist bestellt, oder ein
+        Stop in der Pause (Entladen, Herunterfahren) hat ihn erübrigt. ``False``
+        heißt: in der Pause kam ein Befehl oder eine Live-Anfrage; der Abstand
+        zum letzten Sitzungsende ist jetzt eingehalten, also darf die Schleife
+        für sie verbinden, und der Reload folgt nach dieser Sitzung.
         """
         if self._session_ended_at is not None:
             remaining = (
@@ -1038,13 +1061,20 @@ class TrumaCoordinator(DataUpdateCoordinator[Bus]):
             if remaining > 0:
                 await self._wait_for_stop(remaining)
         if self._stop:
-            return
+            return True
+        if self._session_wanted:
+            return False
         LOGGER.info(
             "Truma %s: reloading to apply the changed options, now that no "
             "BLE session is running",
             self.unique_id,
         )
         self.hass.config_entries.async_schedule_reload(self.config_entry.entry_id)
+        # Nichts mehr dahinter. Home Assistant startet den Reload-Task eager:
+        # das Entladen läuft sofort auf diesem Stack an, ``async_stop`` wartet
+        # auf genau diese Schleife. Jede Zeile hier liefe erst währenddessen
+        # oder danach, gegen einen Coordinator, der schon abgebaut wird.
+        return True
 
     async def _connect_and_run(self) -> bool:
         """Connect, run startup, then hold until the link drops.

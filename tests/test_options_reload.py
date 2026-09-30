@@ -34,7 +34,8 @@ Was der Test festnagelt:
    ``AttributeError`` in einem Hintergrund-Task zu enden.
 8. läuft gerade eine BLE-Sitzung, lädt der Listener **nicht** selbst neu,
    sondern übergibt den Wunsch genau einmal dem Coordinator, der erst nach
-   dem Ende der Sitzung neu lädt (REV-007).
+   dem Ende der Sitzung neu lädt (REV-007) -- ebenso, wenn der Reload schon
+   bestellt, die Sitzungsschleife aber schon beendet ist.
 
 Run: ``python3 tests/test_options_reload.py``
 """
@@ -126,6 +127,7 @@ class _Coordinator:
         # Aufschieben. Die Tests, die eine laufende Sitzung brauchen, setzen
         # das Feld selbst.
         self.session_running = False
+        self.reload_pending = False
         self.reload_requests = 0
 
     def async_request_reload(self) -> None:
@@ -258,6 +260,25 @@ def test_a_change_during_a_session_waits_for_the_session() -> None:
     assert entry.runtime_data.known_options == {"poll_interval_seconds": 600}, (
         entry.runtime_data.known_options
     )
+
+
+def test_a_change_with_a_reload_already_ordered_is_handed_over_too() -> None:
+    """Der Reload ist bestellt, die Schleife schon beendet: kein zweiter Reload.
+
+    Zwischen dem Ende der Sitzungsschleife und dem Abschluss des Entladens
+    läuft keine Sitzung mehr. Ein Reload von hier wartete auf den Setup-Lock
+    und träfe danach den frisch aufgesetzten Entry mitten in seinem ersten
+    Verbindungsaufbau -- und die neue Option liest der bestellte Reload
+    ohnehin.
+    """
+    hass, entry = _started({"poll_interval_seconds": 300})
+    entry.runtime_data.reload_pending = True
+
+    entry.set_options({"poll_interval_seconds": 600})
+    _fire(hass, entry)
+
+    assert hass.config_entries.reloaded == [], hass.config_entries.reloaded
+    assert entry.runtime_data.reload_requests == 1, entry.runtime_data.reload_requests
 
 
 def test_an_address_update_from_discovery_does_not_reload() -> None:

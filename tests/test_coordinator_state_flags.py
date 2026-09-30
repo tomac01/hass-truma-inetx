@@ -48,8 +48,10 @@ Was die Datei festnagelt:
     Einzelbefehl wird nicht gegen den Bus-Cache gehalten.
 9.  ein Reload für eine geänderte Option kommt nie mitten in der Sitzung:
     Dauerlink, Live-Fenster und Befehls-Nachlauf geben den Link dafür frei,
-    ein laufender Befehl nicht; der Reload folgt frühestens 30 s nach dem
-    Sitzungsende, und ein Stop in dieser Pause verhindert ihn (REV-007).
+    ein laufender Befehl oder Lesevorgang nicht; der Reload folgt frühestens
+    30 s nach dem Ende des Abbaus -- auch eines gescheiterten Versuchs --, ein
+    wartender Befehl wird vorher noch bedient, und ein Stop in dieser Pause
+    verhindert ihn, ohne dass das Entladen hängt (REV-007).
 
 Run: ``python3 tests/test_coordinator_state_flags.py``
 """
@@ -1138,11 +1140,18 @@ def _with_reloads(coord: _Coord) -> _Reloads:
     return reloads
 
 
+async def _yield() -> None:
+    """Den echten Event-Loop einmal abgeben, damit ``_run_bounded`` greifen kann."""
+    await asyncio.sleep(0)
+
+
 def _run_bounded(coord: _Coord) -> None:
     """``_run`` fahren, in echter Zeit auf zwei Sekunden begrenzt.
 
     Eine Mutation, die den Übergabe-Zweig aushebelt, liesse die Schleife sonst
-    endlos weiter anwählen, statt den Test scheitern zu lassen.
+    endlos weiter anwählen, statt den Test scheitern zu lassen. Die Grenze
+    greift nur, wenn die Schleife den Event-Loop auch einmal abgibt -- darum
+    ruft jeder Anwahl-Stub hier ``_yield()``.
     """
 
     async def _go() -> None:
@@ -1166,6 +1175,7 @@ def test_a_reload_requested_mid_session_waits_for_the_end_and_the_settle() -> No
 
     async def _connect_and_run() -> bool:
         attempts.append(coord.clock.now)
+        await _yield()
         coord.async_request_reload()
         coord.clock.now += 20  # die Sitzung läuft noch 20 s weiter
         return True
@@ -1197,6 +1207,7 @@ def test_a_reload_long_after_the_last_session_needs_no_settle() -> None:
 
     async def _connect_and_run() -> bool:
         attempts.append(coord.clock.now)
+        await _yield()
         return True
 
     async def _wait_before_retry(_delay: float) -> None:
@@ -1227,6 +1238,7 @@ def test_a_stop_during_the_settle_cancels_the_reload() -> None:
     reloads = _with_reloads(coord)
 
     async def _connect_and_run() -> bool:
+        await _yield()
         coord.async_request_reload()
         return True
 
@@ -1360,6 +1372,291 @@ def test_session_running_follows_the_session_task() -> None:
         assert coord.session_running is False, "ein beendeter Task nicht"
 
     asyncio.run(_go())
+
+
+
+def _settle_stub(coord: _Coord) -> list[float]:
+    """``_wait_for_stop`` durch eine Pause auf der virtuellen Uhr ersetzen."""
+    settles: list[float] = []
+
+    async def _wait_for_stop(delay: float) -> None:
+        settles.append(delay)
+        coord.clock.now += delay
+
+    coord._wait_for_stop = _wait_for_stop
+    return settles
+
+
+def test_a_failed_attempt_gets_the_same_settle() -> None:
+    """Auch ein gescheiterter Versuch hinterlässt ein Panel, das Ruhe braucht.
+
+    Ob der Abstand nach einem Fehlschlag reicht, wissen wir nicht besser als
+    nach einem sauberen Poll -- also gilt derselbe.
+    """
+    coord = _make_coord(poll_interval=300)
+    reloads = _with_reloads(coord)
+    settles = _settle_stub(coord)
+    ended: list[float] = []
+
+    async def _connect_and_run() -> bool:
+        await _yield()
+        coord.async_request_reload()
+        coord.clock.now += 20
+        ended.append(coord.clock.now)
+        raise RuntimeError("Anwahl gescheitert")
+
+    coord._connect_and_run = _connect_and_run
+    _run_bounded(coord)
+
+    assert settles == [30.0], settles
+    assert reloads.scheduled == [("01", ended[0] + 30.0)], reloads.scheduled
+
+
+def test_the_settle_waits_only_what_is_left() -> None:
+    """Endete die Sitzung vor 10 s, fehlen noch 20 -- nicht noch einmal 30."""
+    coord = _make_coord(poll_interval=300)
+    reloads = _with_reloads(coord)
+    settles = _settle_stub(coord)
+    started: list[float] = []
+
+    async def _connect_and_run() -> bool:
+        started.append(coord.clock.now)
+        await _yield()
+        return True
+
+    async def _wait_before_retry(_delay: float) -> None:
+        coord.clock.now += 10
+        coord.async_request_reload()
+
+    coord._connect_and_run = _connect_and_run
+    coord._wait_before_retry = _wait_before_retry
+    _run_bounded(coord)
+
+    assert settles == [20.0], settles
+    assert reloads.scheduled == [("01", started[0] + 30.0)], reloads.scheduled
+
+
+def test_a_reload_before_any_session_goes_at_once() -> None:
+    """Ohne je verbunden zu haben, gibt es nichts abzuwarten und nichts anzuwählen."""
+    coord = _make_coord(poll_interval=300)
+    reloads = _with_reloads(coord)
+    settles = _settle_stub(coord)
+    start = coord.clock.now
+    attempts: list[float] = []
+
+    async def _connect_and_run() -> bool:
+        attempts.append(coord.clock.now)
+        await _yield()
+        return True
+
+    coord._connect_and_run = _connect_and_run
+    coord.async_request_reload()
+    _run_bounded(coord)
+
+    assert attempts == [], f"vor dem Reload noch angewählt: {attempts}"
+    assert settles == [], settles
+    assert reloads.scheduled == [("01", start)], reloads.scheduled
+
+
+def test_the_settle_counts_from_the_end_of_the_teardown() -> None:
+    """Der Abbau kostet Zeit; gemessen wird ab seinem Ende, nicht ab seinem Beginn."""
+    coord = _make_coord(poll_interval=300)
+    reloads = _with_reloads(coord)
+    settles = _settle_stub(coord)
+    ended: list[float] = []
+
+    async def _connect_and_run() -> bool:
+        await _yield()
+        coord.async_request_reload()
+        coord.clock.now += 20
+        ended.append(coord.clock.now)
+        return True
+
+    async def _disconnect_client() -> None:
+        coord._client = None
+        coord._connected_event.clear()
+        coord.clock.now += 5
+
+    coord._connect_and_run = _connect_and_run
+    coord._disconnect_client = _disconnect_client
+    _run_bounded(coord)
+
+    assert settles == [30.0], settles
+    assert reloads.scheduled == [("01", ended[0] + 5 + 30.0)], reloads.scheduled
+
+
+def test_a_command_waiting_for_a_link_is_served_before_the_reload() -> None:
+    """Ein Befehl wartet schon auf den nächsten Poll: er geht vor.
+
+    Sonst liefe er ins 75-s-Timeout eines Coordinators, den der Reload gerade
+    abbaut, und meldete „did not answer in time" für etwas, das nie versucht
+    wurde.
+    """
+    coord = _make_coord(poll_interval=300)
+    reloads = _with_reloads(coord)
+    settles = _settle_stub(coord)
+    attempts: list[float] = []
+
+    async def _connect_and_run() -> bool:
+        attempts.append(coord.clock.now)
+        await _yield()
+        coord._writes_pending = 0  # der Befehl ist durch
+        coord.clock.now += 20
+        return True
+
+    coord._connect_and_run = _connect_and_run
+    coord._writes_pending = 1
+    coord.async_request_reload()
+    _run_bounded(coord)
+
+    assert len(attempts) == 1, f"der wartende Befehl wurde nicht bedient: {attempts}"
+    assert settles == [30.0], settles
+    assert reloads.scheduled == [("01", attempts[0] + 20 + 30.0)], reloads.scheduled
+
+
+def test_a_command_arriving_in_the_settle_is_served_after_it() -> None:
+    """Ein Befehl in der Pause: erst die Pause, dann bedienen, dann der Reload.
+
+    Die Pause selbst hört nicht auf Befehle -- sie ist der Abstand, den das
+    Panel braucht. Danach ist er eingehalten, und der Befehl bekommt seine
+    Sitzung, statt ins Timeout zu laufen.
+    """
+    coord = _make_coord(poll_interval=300)
+    reloads = _with_reloads(coord)
+    settles: list[float] = []
+    attempts: list[float] = []
+
+    async def _wait_for_stop(delay: float) -> None:
+        settles.append(delay)
+        coord.clock.now += delay
+        if len(settles) == 1:
+            coord._writes_pending = 1
+
+    async def _connect_and_run() -> bool:
+        attempts.append(coord.clock.now)
+        await _yield()
+        if len(attempts) == 1:
+            coord.async_request_reload()
+        else:
+            coord._writes_pending = 0
+            coord.clock.now += 20
+        return True
+
+    coord._wait_for_stop = _wait_for_stop
+    coord._connect_and_run = _connect_and_run
+    _run_bounded(coord)
+
+    assert len(attempts) == 2, attempts
+    assert attempts[1] == attempts[0] + 30.0, "angewählt, bevor die Pause um war"
+    assert settles == [30.0, 30.0], settles
+    assert reloads.scheduled == [("01", attempts[1] + 20 + 30.0)], reloads.scheduled
+
+
+def test_unloading_during_the_settle_is_quick_and_reloads_nothing() -> None:
+    """Ein echtes ``async_stop`` in der Pause: sofort vorbei, kein Reload.
+
+    Das Entladen wartet auf die Schleife höchstens ``_SESSION_EXIT_TIMEOUT``
+    (5 s) und bricht sie dann ab -- mit einer Warnung über einen womöglich
+    halboffenen Link, die hier nicht stimmen würde. Die Pause muss also auf
+    den Stop hören, nicht nur ablaufen.
+    """
+    coord = _make_coord(poll_interval=300)
+    reloads = _with_reloads(coord)
+
+    async def _connect_and_run() -> bool:
+        await _yield()
+        coord.async_request_reload()
+        return True
+
+    coord._connect_and_run = _connect_and_run
+
+    async def _go() -> float:
+        coord._session_task = asyncio.ensure_future(coord._run())
+        for _ in range(50):
+            await asyncio.sleep(0)
+        assert not coord._session_task.done(), "die Schleife steht nicht in der Pause"
+        started = time.monotonic()
+        await coord.async_stop()
+        return time.monotonic() - started
+
+    took = asyncio.run(_go())
+
+    assert took < 1.0, f"das Entladen hing {took:.1f} s"
+    assert reloads.scheduled == [], reloads.scheduled
+
+
+def test_a_manual_read_is_not_cut_for_a_reload() -> None:
+    """Ein laufender Lesevorgang („Jetzt synchronisieren") läuft zu Ende."""
+    for poll_interval in (0, 300):
+        coord = _make_coord(poll_interval=poll_interval)
+        coord.panel_talks = True
+
+        def _hook(c: _Coord) -> None:
+            if c.ticks == 2:
+                c._manual_requests = {1: asyncio.Event()}
+                c.async_request_reload()
+            if c.ticks == 10:
+                c._manual_requests = {}
+
+        coord.on_tick = _hook
+        result, dwell = _hold(coord)
+
+        assert result is True, result
+        assert 10 <= dwell <= 11, f"poll_interval={poll_interval}: Link nach {dwell} s"
+
+
+def test_the_settle_pause_ends_by_itself() -> None:
+    """Ohne Stop endet die Pause nach ihrer Dauer -- sonst käme der Reload nie."""
+    coord = _make_coord(poll_interval=300)
+
+    async def _go() -> None:
+        await asyncio.wait_for(coord._wait_for_stop(0.05), 1)
+
+    asyncio.run(_go())
+
+
+
+def test_a_waiting_request_right_after_a_session_goes_first_without_the_settle() -> None:
+    """Befehl oder Live-Wunsch direkt nach einer Sitzung: sofort bedienen.
+
+    Ohne ausstehenden Reload würde er genauso sofort bedient; die Pause
+    schützt den Reload, nicht den Befehl. Wer ihn hinter die Pause stellt,
+    lässt den Nutzer 30 s länger warten, ohne dem Panel etwas zu ersparen.
+    Beide Arten zählen: ein gesendeter Befehl (``_writes_pending``) und ein
+    gedrücktes „Jetzt synchronisieren" (``_manual_wake_pending``).
+    """
+    for kind in ("_writes_pending", "_manual_wake_pending"):
+        coord = _make_coord(poll_interval=300)
+        reloads = _with_reloads(coord)
+        settles = _settle_stub(coord)
+        attempts: list[float] = []
+        gaps: list[float] = []
+
+        async def _connect_and_run() -> bool:
+            attempts.append(coord.clock.now)
+            await _yield()
+            if len(attempts) == 2:
+                coord._writes_pending = 0
+                coord.clock.now += 20
+            return True
+
+        async def _wait_before_retry(_delay: float) -> None:
+            gaps.append(coord.clock.now)
+            if len(gaps) == 1:
+                # Die erste Sitzung ist eben zu Ende; jetzt kommen beide.
+                setattr(coord, kind, True if kind == "_manual_wake_pending" else 1)
+                coord.async_request_reload()
+
+        coord._connect_and_run = _connect_and_run
+        coord._wait_before_retry = _wait_before_retry
+        _run_bounded(coord)
+
+        assert len(attempts) == 2, f"{kind}: {attempts}"
+        assert attempts[1] == gaps[0], f"{kind}: erst nach {attempts[1] - gaps[0]} s bedient"
+        assert settles == [30.0], f"{kind}: {settles}"
+        assert reloads.scheduled == [("01", attempts[1] + 20 + 30.0)], (
+            f"{kind}: {reloads.scheduled}"
+        )
 
 
 if __name__ == "__main__":
