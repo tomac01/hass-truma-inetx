@@ -95,6 +95,13 @@ async def _async_update_listener(hass: HomeAssistant, entry: TrumaConfigEntry) -
     entladen hat und ``runtime_data`` fort ist. Dann ist ein Reload ohnehin
     unterwegs; der Aufruf kehrt still zurück, statt in einem Hintergrund-Task
     an einem ``AttributeError`` zu enden.
+
+    Läuft die Sitzungsschleife, lädt der Listener nicht selbst neu, sondern
+    übergibt an ``TrumaCoordinator.async_request_reload``: Ein Reload mitten in
+    einer BLE-Sitzung ließ das Panel zweimal keine Verbindung mehr annehmen,
+    bis es stromlos war (REV-007, 25.09. und 30.09.2026 -- beim zweiten Mal
+    ausgelöst durch genau diese Option). Der Coordinator beendet die Sitzung
+    auf dem gewöhnlichen Weg und lädt mit Abstand dazu neu.
     """
     coordinator = getattr(entry, "runtime_data", None)
     if coordinator is None:
@@ -103,6 +110,9 @@ async def _async_update_listener(hass: HomeAssistant, entry: TrumaConfigEntry) -
     if options == coordinator.known_options:
         return
     coordinator.known_options = options
+    if coordinator.session_running:
+        coordinator.async_request_reload()
+        return
     await hass.config_entries.async_reload(entry.entry_id)
 
 

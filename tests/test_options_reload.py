@@ -32,6 +32,9 @@ Was der Test festnagelt:
 7. ein Listener, der erst läuft, wenn der Entry schon entladen wird
    (``runtime_data`` fehlt), kehrt still zurück, statt mit einem
    ``AttributeError`` in einem Hintergrund-Task zu enden.
+8. läuft gerade eine BLE-Sitzung, lädt der Listener **nicht** selbst neu,
+   sondern übergibt den Wunsch genau einmal dem Coordinator, der erst nach
+   dem Ende der Sitzung neu lädt (REV-007).
 
 Run: ``python3 tests/test_options_reload.py``
 """
@@ -119,6 +122,14 @@ class _Coordinator:
         # Wie im echten Coordinator: das Feld existiert ab dem ersten Moment,
         # gefüllt wird es erst beim Anmelden des Listeners.
         self.known_options: dict = {}
+        # Ohne laufende Sitzung lädt der Listener sofort neu -- so wie vor dem
+        # Aufschieben. Die Tests, die eine laufende Sitzung brauchen, setzen
+        # das Feld selbst.
+        self.session_running = False
+        self.reload_requests = 0
+
+    def async_request_reload(self) -> None:
+        self.reload_requests += 1
 
     async def async_config_entry_first_refresh(self) -> None:
         pass
@@ -219,6 +230,34 @@ def test_a_changed_poll_interval_reloads_exactly_once() -> None:
     _fire(hass, entry)
 
     assert hass.config_entries.reloaded == ["abc123"], hass.config_entries.reloaded
+    assert entry.runtime_data.reload_requests == 0, (
+        "ohne laufende Sitzung gibt es nichts abzuwarten"
+    )
+
+
+def test_a_change_during_a_session_waits_for_the_session() -> None:
+    """Läuft die Sitzung, lädt der Listener nicht selbst neu.
+
+    Ein Reload mitten in einer Sitzung ließ das Panel zweimal keine Verbindung
+    mehr annehmen, bis es stromlos war (REV-007: 25.09. und 30.09.2026, beim
+    zweiten Mal ausgelöst durch genau diese Option). Der Listener übergibt den
+    Wunsch deshalb dem Coordinator, der den Reload erst nach dem Ende der
+    Sitzung auslöst -- und zwar genau einmal, auch wenn er zweimal feuert.
+    """
+    hass, entry = _started({"poll_interval_seconds": 300})
+    entry.runtime_data.session_running = True
+
+    entry.set_options({"poll_interval_seconds": 600})
+    _fire(hass, entry)
+    _fire(hass, entry)
+
+    assert hass.config_entries.reloaded == [], (
+        f"Reload mitten in der Sitzung: {hass.config_entries.reloaded}"
+    )
+    assert entry.runtime_data.reload_requests == 1, entry.runtime_data.reload_requests
+    assert entry.runtime_data.known_options == {"poll_interval_seconds": 600}, (
+        entry.runtime_data.known_options
+    )
 
 
 def test_an_address_update_from_discovery_does_not_reload() -> None:

@@ -115,6 +115,7 @@ class _Coord:
         self._manual_release_requested = False
         self._manual_requests = {}
         self._writes_pending = 0
+        self._reload_pending = False
         self._last_frame = 0.0
         self._last_kind = None
         self._session_ok = False

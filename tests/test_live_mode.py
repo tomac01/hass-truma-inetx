@@ -137,6 +137,7 @@ class _Coord:
         self._manual_hold_request_minutes = None
         self._manual_hold_until = 0.0
         self._manual_release_requested = False
+        self._reload_pending = False
         self._manual_requests = {}
         self._manual_operation = None
         self._write_feedback = {}
@@ -231,6 +232,7 @@ class _RunCoord:
         self.hass = stubs.SimpleNamespace(loop=self.clock)
         self._stop = False
         self._manual_wake_pending = False
+        self._reload_pending = False
         self._manual_hold_until = 0.0
         self._command_hold_until = 0.0
         self._connected_event = asyncio.Event()

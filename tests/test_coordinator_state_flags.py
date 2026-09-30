@@ -46,6 +46,10 @@ Was die Datei festnagelt:
     entwertet keine Bestätigung, ein Wartepfad ohne brauchbaren Link wird
     abgewiesen, auf einem toten Link wird nicht weitergeschrieben und ein
     Einzelbefehl wird nicht gegen den Bus-Cache gehalten.
+9.  ein Reload für eine geänderte Option kommt nie mitten in der Sitzung:
+    Dauerlink, Live-Fenster und Befehls-Nachlauf geben den Link dafür frei,
+    ein laufender Befehl nicht; der Reload folgt frühestens 30 s nach dem
+    Sitzungsende, und ein Stop in dieser Pause verhindert ihn (REV-007).
 
 Run: ``python3 tests/test_coordinator_state_flags.py``
 """
@@ -1107,6 +1111,255 @@ def test_the_live_window_limit_is_a_literal() -> None:
     exc = _expect_error(coord.async_request_manual_session(1000))
     assert "whole number" in str(exc), exc
     assert coord.discoveries == 1, "die abgewiesene Dauer hat trotzdem gelesen"
+
+
+# -- Reload erst nach der Sitzung (REV-007) --------------------------------
+
+
+class _Reloads:
+    """``hass.config_entries``, so weit der Coordinator es für den Reload braucht.
+
+    Merkt sich zu jedem angeforderten Reload die Uhrzeit, denn die Frage ist
+    nicht nur *ob*, sondern *wann* -- zu früh nach dem Sitzungsende ist genau
+    der Fehler, um den es geht.
+    """
+
+    def __init__(self, clock: _Clock) -> None:
+        self._clock = clock
+        self.scheduled: list[tuple[str, float]] = []
+
+    def async_schedule_reload(self, entry_id: str) -> None:
+        self.scheduled.append((entry_id, self._clock.now))
+
+
+def _with_reloads(coord: _Coord) -> _Reloads:
+    reloads = _Reloads(coord.clock)
+    coord.hass.config_entries = reloads
+    return reloads
+
+
+def _run_bounded(coord: _Coord) -> None:
+    """``_run`` fahren, in echter Zeit auf zwei Sekunden begrenzt.
+
+    Eine Mutation, die den Übergabe-Zweig aushebelt, liesse die Schleife sonst
+    endlos weiter anwählen, statt den Test scheitern zu lassen.
+    """
+
+    async def _go() -> None:
+        await asyncio.wait_for(coord._run(), 2)
+
+    asyncio.run(_go())
+
+
+def test_a_reload_requested_mid_session_waits_for_the_end_and_the_settle() -> None:
+    """Der Listener feuert mitten im Poll: erst Sitzungsende, dann 30 s, dann Reload.
+
+    Die 30 s stehen hier als Literal. Am 30.09.2026 kam der Neuaufbau 4 s nach
+    dem Abbau und scheiterte, 30 s nach einem sauberen Trennen gelang er
+    (REV-007). Eine Prüfung gegen ``_RELOAD_SETTLE_SECONDS`` selbst verschöbe
+    ihre Grenze mit jeder Änderung der Konstante mit.
+    """
+    coord = _make_coord(poll_interval=300)
+    reloads = _with_reloads(coord)
+    attempts: list[float] = []
+    settles: list[float] = []
+
+    async def _connect_and_run() -> bool:
+        attempts.append(coord.clock.now)
+        coord.async_request_reload()
+        coord.clock.now += 20  # die Sitzung läuft noch 20 s weiter
+        return True
+
+    async def _wait_for_stop(delay: float) -> None:
+        settles.append(delay)
+        coord.clock.now += delay
+
+    coord._connect_and_run = _connect_and_run
+    coord._wait_for_stop = _wait_for_stop
+    _run_bounded(coord)
+
+    assert len(attempts) == 1, f"nach dem Reload-Wunsch weiter angewählt: {attempts}"
+    assert settles == [30.0], settles
+    session_end = attempts[0] + 20
+    assert reloads.scheduled == [("01", session_end + 30.0)], reloads.scheduled
+
+
+def test_a_reload_long_after_the_last_session_needs_no_settle() -> None:
+    """Kommt der Wunsch in der Pause zwischen zwei Polls, wird nicht extra gewartet.
+
+    Der Abstand zum letzten Sitzungsende ist dann längst größer als 30 s -- wer
+    trotzdem wartet, verschiebt nur die Wirkung der neuen Option.
+    """
+    coord = _make_coord(poll_interval=300)
+    reloads = _with_reloads(coord)
+    attempts: list[float] = []
+    settles: list[float] = []
+
+    async def _connect_and_run() -> bool:
+        attempts.append(coord.clock.now)
+        return True
+
+    async def _wait_before_retry(_delay: float) -> None:
+        coord.clock.now += 120
+        coord.async_request_reload()
+
+    async def _wait_for_stop(delay: float) -> None:
+        settles.append(delay)
+        coord.clock.now += delay
+
+    coord._connect_and_run = _connect_and_run
+    coord._wait_before_retry = _wait_before_retry
+    coord._wait_for_stop = _wait_for_stop
+    _run_bounded(coord)
+
+    assert len(attempts) == 1, attempts
+    assert settles == [], f"unnötig gewartet: {settles}"
+    assert reloads.scheduled == [("01", attempts[0] + 120)], reloads.scheduled
+
+
+def test_a_stop_during_the_settle_cancels_the_reload() -> None:
+    """Entlädt Home Assistant den Entry in der Pause, bleibt es dabei.
+
+    Ein Reload auf einen Entry, der gerade entladen wird oder Home Assistant
+    beim Herunterfahren begleitet, wäre ein Setup, das niemand bestellt hat.
+    """
+    coord = _make_coord(poll_interval=300)
+    reloads = _with_reloads(coord)
+
+    async def _connect_and_run() -> bool:
+        coord.async_request_reload()
+        return True
+
+    async def _wait_for_stop(delay: float) -> None:
+        coord.clock.now += 1
+        coord._stop = True
+
+    coord._connect_and_run = _connect_and_run
+    coord._wait_for_stop = _wait_for_stop
+    _run_bounded(coord)
+
+    assert reloads.scheduled == [], reloads.scheduled
+
+
+def test_a_reload_request_releases_a_held_link() -> None:
+    """Dauerlink, Live-Fenster und Befehls-Nachlauf geben den Link frei.
+
+    Alle drei halten ihn sonst lange: der Dauerlink bis zum nächsten Abriss,
+    das Live-Fenster bis zu 999 Minuten, der Nachlauf eine Minute. Ohne
+    Freigabe wartete die geänderte Option so lange -- im Dauerbetrieb für
+    immer. Freigegeben wird auf dem gewöhnlichen Weg: ``_finish_startup``
+    kehrt zurück, ``_run`` trennt den Link wie nach jedem Poll.
+    """
+    cases = {
+        "Dauerlink": dict(poll_interval=0),
+        "Live-Fenster": dict(poll_interval=300, live=True),
+        "Befehls-Nachlauf": dict(poll_interval=300, command=True),
+    }
+    for label, case in cases.items():
+        coord = _make_coord(poll_interval=case["poll_interval"])
+        coord.panel_talks = True
+        if case.get("live"):
+            coord._manual_hold_until = coord.clock.now + 600 * 60
+        if case.get("command"):
+            coord._command_hold_until = coord.clock.now + 60
+
+        def _hook(c: _Coord) -> None:
+            if c.ticks == 5:
+                c.async_request_reload()
+
+        coord.on_tick = _hook
+        client = _Client()
+        result, dwell = _hold(coord, client)
+
+        assert result is True, f"{label}: {result}"
+        assert dwell <= 6, f"{label}: Link erst nach {dwell} s freigegeben"
+        assert client.connected, f"{label}: der Test selbst hat den Link fallen lassen"
+
+
+def test_a_running_command_is_not_cut_for_a_reload() -> None:
+    """Ein Befehl, der gerade gesendet wird, läuft zu Ende.
+
+    Der Reload-Wunsch steht in der Rangfolge hinter den Writes: sonst legte
+    er mitten im Befehl auf, und der Nutzer sähe einen Fehler für etwas, das
+    er gar nicht ausgelöst hat.
+    """
+    for poll_interval in (0, 300):
+        coord = _make_coord(poll_interval=poll_interval)
+        coord.panel_talks = True
+
+        def _hook(c: _Coord) -> None:
+            if c.ticks == 2:
+                c._writes_pending = 1
+                c.async_request_reload()
+            if c.ticks == 10:
+                c._writes_pending = 0
+
+        coord.on_tick = _hook
+        result, dwell = _hold(coord)
+
+        assert result is True, result
+        assert 10 <= dwell <= 11, f"poll_interval={poll_interval}: Link nach {dwell} s"
+
+
+def test_a_reload_request_wakes_the_pause_between_polls() -> None:
+    """Die Pause zwischen zwei Polls endet sofort, auch wenn der Wunsch vorher kam.
+
+    Das läuft in echter Zeit: ``_wait_before_retry`` wartet auf echte Events.
+    Wacht sie nicht auf, schlägt die Zeitgrenze an, statt 300 s zu hängen.
+    """
+    coord = _make_coord(poll_interval=300)
+
+    async def _during() -> None:
+        waiter = asyncio.ensure_future(coord._wait_before_retry(300))
+        await asyncio.sleep(0)
+        coord.async_request_reload()
+        await asyncio.wait_for(waiter, 1)
+
+    asyncio.run(_during())
+
+    coord = _make_coord(poll_interval=300)
+    coord.async_request_reload()
+
+    async def _before() -> None:
+        await asyncio.wait_for(coord._wait_before_retry(300), 1)
+
+    asyncio.run(_before())
+
+
+def test_the_settle_pause_ends_on_stop_and_only_on_stop() -> None:
+    """``_wait_for_stop`` hört auf den Stop -- und nicht auf Befehle.
+
+    Käme ein Befehl in der Pause und weckte sie, folgte der Reload sofort auf
+    einen Link, der eben erst gefallen ist -- genau das, was die Pause
+    verhindern soll.
+    """
+    coord = _make_coord(poll_interval=300)
+
+    async def _go() -> None:
+        waiter = asyncio.ensure_future(coord._wait_for_stop(300))
+        await asyncio.sleep(0)
+        coord._wake_event.set()
+        await asyncio.sleep(0.05)
+        assert not waiter.done(), "ein Weck-Impuls hat die Pause beendet"
+        coord._stop_event.set()
+        await asyncio.wait_for(waiter, 1)
+
+    asyncio.run(_go())
+
+
+def test_session_running_follows_the_session_task() -> None:
+    """Der Listener fragt danach, ob er selbst neu laden darf."""
+    coord = _make_coord(poll_interval=300)
+    assert coord.session_running is False, "ohne Task läuft keine Sitzung"
+
+    async def _go() -> None:
+        loop = asyncio.get_running_loop()
+        coord._session_task = loop.create_future()
+        assert coord.session_running is True, "ein laufender Task ist eine Sitzung"
+        coord._session_task.set_result(None)
+        assert coord.session_running is False, "ein beendeter Task nicht"
+
+    asyncio.run(_go())
 
 
 if __name__ == "__main__":

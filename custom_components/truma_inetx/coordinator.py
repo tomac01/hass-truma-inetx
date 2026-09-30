@@ -126,6 +126,14 @@ _WRITE_CONNECT_TIMEOUT = 75  # seconds
 # task parked inside a connect attempt -- and it is spent by Home Assistant
 # unloading the config entry, which is why it is short rather than generous.
 _SESSION_EXIT_TIMEOUT = 5.0  # seconds
+# Wie lange nach dem Ende einer Sitzung ein Reload frühestens folgt, der eine
+# geänderte Option wirksam macht. Ein Reload mitten in der Sitzung ließ das
+# Panel zweimal keine Verbindung mehr annehmen, bis es stromlos war (REV-007,
+# 25.09. und 30.09.2026); am 30.09. kam der Neuaufbau 4 s nach dem Abbau. Den
+# Mechanismus kennen wir nicht. 30 s ist der kürzeste Abstand zwischen einem
+# sauberen Trennen und einer neuen Verbindung, der auf dem Fahrzeug gemessen
+# gelungen ist -- kein Rechenwert, eine Beobachtung.
+_RELOAD_SETTLE_SECONDS = 30.0
 _STORAGE_VERSION = 1
 
 # How often to ask the on-demand sensors for a fresh measurement while the
@@ -273,6 +281,10 @@ class TrumaCoordinator(DataUpdateCoordinator[Bus]):
         self._wake_event = asyncio.Event()
         self._connected_event = asyncio.Event()
         self._writes_pending = 0
+        # Eine geänderte Option wartet auf ihren Reload (async_request_reload),
+        # und wann die letzte Sitzung endete -- der Reload hält Abstand dazu.
+        self._reload_pending = False
+        self._session_ended_at: float | None = None
         # Ein Rückmeldungsbuch je laufendem Schreibvorgang, unter dessen
         # Vorgangs-Token: Token -> {(addr, topic, param): Wert}. Eines je
         # Vorgang und nicht eines für alle, weil Home Assistant Service-Aufrufe
@@ -673,6 +685,35 @@ class TrumaCoordinator(DataUpdateCoordinator[Bus]):
         self._encryption_failures = 0
         ir.async_delete_issue(self.hass, DOMAIN, ISSUE_LOST_BOND)
 
+    @property
+    def session_running(self) -> bool:
+        """Ob die Sitzungsschleife läuft -- verbunden, beim Anwählen oder in der Pause."""
+        task = self._session_task
+        return task is not None and not task.done()
+
+    @callback
+    def async_request_reload(self) -> None:
+        """Den Entry neu laden, aber erst, wenn keine Sitzung mehr läuft.
+
+        Der Update-Listener ruft das, wenn sich die Optionen ändern, während
+        die Sitzungsschleife läuft. Ein Reload mitten in der Sitzung ließ das
+        Panel keine Verbindung mehr annehmen (REV-007). Deshalb endet eine
+        laufende Sitzung zuerst auf dem gewöhnlichen Weg -- ein Dauerlink, ein
+        Live-Fenster oder ein Befehls-Nachlauf geben den Link dafür frei, ein
+        laufender Befehl nicht --, und der Reload folgt frühestens
+        ``_RELOAD_SETTLE_SECONDS`` nach ihrem Ende. Der Weck-Impuls beendet die
+        Pause zwischen zwei Polls, damit die Option nicht bis zum nächsten Poll
+        wartet.
+        """
+        if not self._reload_pending:
+            LOGGER.info(
+                "Truma %s: options changed; applying them once the BLE session "
+                "has ended",
+                self.unique_id,
+            )
+        self._reload_pending = True
+        self._wake_event.set()
+
     async def async_start(self) -> None:
         """Load identity and launch the background BLE session."""
         await self._load_stored_state()
@@ -861,6 +902,11 @@ class TrumaCoordinator(DataUpdateCoordinator[Bus]):
         """Maintain the BLE session, reconnecting with exponential backoff."""
         delay = _RECONNECT_DELAY_BASE
         while not self._stop:
+            if self._reload_pending:
+                # Hier und nicht mitten in einem Versuch: am Schleifenkopf ist
+                # kein Link offen und keiner im Aufbau.
+                await self._hand_over_to_reload()
+                return
             # Nur den Weck-Impuls verbrauchen. Die gewünschte Dauer bleibt
             # offen, bis der Startup gelungen ist -- ein gescheiterter Anwahl-
             # versuch muss aber trotzdem den Backoff respektieren, statt ohne
@@ -886,6 +932,7 @@ class TrumaCoordinator(DataUpdateCoordinator[Bus]):
                 # und zwar vor seinem eigenen ``await`` -- hier nachträglich
                 # zu löschen kam zu spät (siehe dort).
                 await self._disconnect_client()
+                self._session_ended_at = self.hass.loop.time()
             if connected and self.poll_interval and not self._stop:
                 # Poll mode: the link going away is the plan, not a fault. The
                 # reading we just took is still the current state, so leave the
@@ -948,10 +995,12 @@ class TrumaCoordinator(DataUpdateCoordinator[Bus]):
         die in die Lücke zwischen zwei Sitzungen fällt, kann so nicht dadurch
         verlorengehen, dass das Event im falschen Moment gelöscht wird.
         """
-        if self._writes_pending or self._manual_wake_pending:
+        if self._writes_pending or self._manual_wake_pending or self._reload_pending:
             return
         self._wake_event.clear()
-        if self._writes_pending or self._manual_wake_pending:  # set while clearing
+        if (  # set while clearing
+            self._writes_pending or self._manual_wake_pending or self._reload_pending
+        ):
             return
         stop = asyncio.ensure_future(self._stop_event.wait())
         wake = asyncio.ensure_future(self._wake_event.wait())
@@ -962,6 +1011,40 @@ class TrumaCoordinator(DataUpdateCoordinator[Bus]):
         finally:
             stop.cancel()
             wake.cancel()
+
+    async def _wait_for_stop(self, delay: float) -> None:
+        """Bis zu ``delay`` Sekunden warten; nur ein Stop beendet das früher.
+
+        Anders als ``_wait_before_retry`` weckt hier kein Befehl: in der Pause
+        vor einem Reload hieße Aufwachen, auf einen eben erst gefallenen Link
+        sofort neu zu laden -- genau das, was die Pause verhindern soll.
+        """
+        stop = asyncio.ensure_future(self._stop_event.wait())
+        try:
+            await asyncio.wait({stop}, timeout=delay)
+        finally:
+            stop.cancel()
+
+    async def _hand_over_to_reload(self) -> None:
+        """Nach der Pause den Reload anstoßen, den eine Optionsänderung wollte.
+
+        Die Schleife endet danach; den Entry baut Home Assistant neu auf. Ein
+        Stop in der Pause -- Entladen, Herunterfahren -- verhindert den Reload.
+        """
+        if self._session_ended_at is not None:
+            remaining = (
+                self._session_ended_at + _RELOAD_SETTLE_SECONDS - self.hass.loop.time()
+            )
+            if remaining > 0:
+                await self._wait_for_stop(remaining)
+        if self._stop:
+            return
+        LOGGER.info(
+            "Truma %s: reloading to apply the changed options, now that no "
+            "BLE session is running",
+            self.unique_id,
+        )
+        self.hass.config_entries.async_schedule_reload(self.config_entry.entry_id)
 
     async def _connect_and_run(self) -> bool:
         """Connect, run startup, then hold until the link drops.
@@ -1339,8 +1422,8 @@ class TrumaCoordinator(DataUpdateCoordinator[Bus]):
             started = self.hass.loop.time()
             # Die Reihenfolge dieser Prüfungen ist bindend, und jede
             # Vertauschung hat ein Gesicht:
-            #   Writes/manuelle Anfragen -> Release-Wunsch -> Command-Hold ->
-            #   Live-Fenster -> Stille -> Verweilgrenze
+            #   Writes/manuelle Anfragen -> Release-Wunsch -> Reload-Wunsch ->
+            #   Command-Hold -> Live-Fenster -> Stille -> Verweilgrenze
             # Der Release vor den Writes legte mitten im Befehl auf; der
             # Command-Hold vor dem Release ließe "Live-Modus beenden" eine
             # Minute lang wirkungslos; das Live-Fenster vor dem Command-Hold
@@ -1356,6 +1439,12 @@ class TrumaCoordinator(DataUpdateCoordinator[Bus]):
                 if self._manual_release_requested:
                     self._manual_release_requested = False
                     self._manual_hold_until = 0.0
+                    break
+                if self._reload_pending:
+                    # Eine geänderte Option wartet (async_request_reload).
+                    # Hinter den Writes, damit kein Befehl mitten im Senden
+                    # abreißt; vor Command-Hold und Live-Fenster, weil die den
+                    # Link sonst bis zu Stunden halten.
                     break
                 now = self.hass.loop.time()
                 if now < self._command_hold_until:
@@ -1401,6 +1490,12 @@ class TrumaCoordinator(DataUpdateCoordinator[Bus]):
         # the on-demand sensors measuring.
         while not self._stop and client.connected:
             await asyncio.sleep(1)
+            if self._reload_pending and not (
+                self._writes_pending or self._manual_requests
+            ):
+                # Ein Dauerlink endet sonst nie von selbst; die geänderte
+                # Option wartete für immer (async_request_reload).
+                break
             now = self.hass.loop.time()
             if now >= next_measure:
                 # Schedule from now rather than from the previous slot: a send

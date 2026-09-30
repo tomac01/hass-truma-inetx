@@ -197,6 +197,7 @@ class _Coord:
         self._last_kind = None
         self._session_ok = False
         self._writes_pending = 0
+        self._reload_pending = False
         # Live-Modus-Felder aus Task 9: _finish_startup liest sie, dieser Test
         # geht sie nie an. Ruhezustand, damit die Poll-Schleife sich normal verhaelt.
         self._manual_hold_request_minutes = None
