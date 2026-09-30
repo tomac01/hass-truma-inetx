@@ -34,12 +34,15 @@ from .bt import (
 from .bus import Bus
 from .const import (
     DOMAIN,
+    ENCRYPTION_FAILURES_BEFORE_WARNING,
+    ISSUE_LOST_BOND,
     ISSUE_NO_PROXY_ROUTE_LEGACY,
     ISSUE_NO_ROUTE,
     LOGGER,
     MANUFACTURER,
     MODEL,
     NO_ROUTE_MISSES_BEFORE_WARNING,
+    is_encryption_failure,
 )
 from .operations import OperationRegistry
 from .proxy import TrumaProxyTracker
@@ -253,6 +256,10 @@ class TrumaCoordinator(DataUpdateCoordinator[Bus]):
         # able to connect to it. Debounces the repair issue (see
         # _async_note_no_route).
         self._no_route_misses = 0
+        # Consecutive sessions that got a GATT connection up and were then
+        # refused encryption. Debounces the lost-bond issue (see
+        # _async_note_encryption_failure).
+        self._encryption_failures = 0
         self._store: Store = Store(hass, _STORAGE_VERSION, f"{DOMAIN}_{entry.entry_id}")
         # Everything the store holds: the app identity plus our own
         # bookkeeping. Kept whole so a save never drops a key it did not know.
@@ -577,6 +584,68 @@ class TrumaCoordinator(DataUpdateCoordinator[Bus]):
         # outlive the rename, showing the user a card with no text behind it.
         ir.async_delete_issue(self.hass, DOMAIN, ISSUE_NO_PROXY_ROUTE_LEGACY)
 
+    def _async_note_encryption_failure(self, exc: Exception) -> None:
+        """Warn when session after session reaches the panel and cannot encrypt.
+
+        The fault this names is one-sided and silent. The adapter or proxy
+        holding the bond has lost its key; the panel still lists it as paired,
+        so it demands encryption we cannot provide, and it refuses to pair
+        afresh unless a human puts it into add-device mode. Nothing on this
+        side can heal it, and nothing on this side said so: on 2026-09-28 it
+        ran for 41 hours with every entity unavailable and no word anywhere
+        (REV-007).
+
+        Two gates, and both carry weight:
+
+        * the session has to have ended *in* an encryption refusal (ATT 0x0f),
+          not in any of the dozen ordinary ways a session ends, and
+        * a GATT connection has to have come up. That is what keeps this apart
+          from ISSUE_NO_ROUTE, whose fault is "nothing can get near it" and
+          whose advice is about adapters and range.
+
+        ``client.transport`` is the second gate. ``TrumaBleClient`` assigns its
+        inner bleak client only once ``establish_connection`` has returned
+        (ble.py:247), so a transport that is not ``None`` means a link was up.
+        Not ``client.connected``, which asks whether it is up *now*: it
+        usually is not, because the proxy tears the link down on the refused
+        write (ble.py:277).
+        """
+        client = self._client
+        if client is None or client.transport is None:
+            # Never reached GATT, so nothing refused us anything. Not counted
+            # either -- otherwise a spell out of range pre-loads the counter
+            # and the first real refusal trips the warning.
+            return
+        if not is_encryption_failure(exc):
+            # A run of mixed failures is not this fault, and must not add up
+            # to it.
+            self._encryption_failures = 0
+            return
+        self._encryption_failures += 1
+        if self._encryption_failures != ENCRYPTION_FAILURES_BEFORE_WARNING:
+            # Fires exactly once on the way up, like _async_note_no_route: the
+            # panel refuses every reconnect, and re-creating the issue each
+            # time would re-notify for as long as the fault lasts.
+            return
+        LOGGER.warning(
+            "Truma %s refuses to encrypt: our key for it is gone while it "
+            "still holds its key for us -- the bond has to be renewed",
+            self.unique_id,
+        )
+        ir.async_create_issue(
+            self.hass,
+            DOMAIN,
+            ISSUE_LOST_BOND,
+            is_fixable=False,
+            severity=ir.IssueSeverity.WARNING,
+            translation_key=ISSUE_LOST_BOND,
+        )
+
+    def _async_clear_encryption_failure(self) -> None:
+        """Reset the run and drop the issue: encryption just worked."""
+        self._encryption_failures = 0
+        ir.async_delete_issue(self.hass, DOMAIN, ISSUE_LOST_BOND)
+
     async def async_start(self) -> None:
         """Load identity and launch the background BLE session."""
         await self._load_stored_state()
@@ -775,6 +844,10 @@ class TrumaCoordinator(DataUpdateCoordinator[Bus]):
                 connected = await self._connect_and_run()
             except Exception as exc:  # noqa: BLE001
                 LOGGER.debug("Truma session ended: %s", exc)
+                # Before the ``finally`` below: _disconnect_client drops
+                # ``_client``, and the client is what says whether a GATT
+                # connection ever came up.
+                self._async_note_encryption_failure(exc)
                 self._note_attempt_failed()
             finally:
                 # Always tear the client down before the next attempt so a
@@ -899,6 +972,14 @@ class TrumaCoordinator(DataUpdateCoordinator[Bus]):
                 self._last_kind = None
                 await client.adopt(initial)
                 self._set_panel_link_connected(True)
+                # Both this path and the dial below subscribe, and the panel's
+                # characteristics are protected, so getting this far proves our
+                # key is good -- the one fact the lost-bond issue turns on.
+                # Here and not beside _async_clear_no_route: a resolve that
+                # succeeded says nothing about encryption, and clearing there
+                # would drop the issue on the very attempt that is about to be
+                # refused again.
+                self._async_clear_encryption_failure()
                 return await self._finish_startup(client)
             # Handed-off link dropped in the setup gap — discard and connect
             # fresh below.
@@ -969,6 +1050,8 @@ class TrumaCoordinator(DataUpdateCoordinator[Bus]):
             )
         await client.connect(ble_device)
         self._set_panel_link_connected(True)
+        # Subscribed, so our key is good -- see the adopted path above.
+        self._async_clear_encryption_failure()
         # The connection established, so this address is not the phantom —
         # clear the blame marker so a later failure (startup, a mid-session
         # drop) does not wrongly banish a perfectly good address.

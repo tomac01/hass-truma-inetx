@@ -132,6 +132,9 @@ class _Coordinator(stubs.FakeCoordinator):
     def _async_clear_no_route(self) -> None:
         pass
 
+    def _async_clear_encryption_failure(self) -> None:
+        pass
+
     async def _finish_startup(self, client) -> bool:
         self.started.append(client)
         return True

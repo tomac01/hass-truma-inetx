@@ -73,3 +73,39 @@ ISSUE_NO_PROXY_ROUTE_LEGACY = "no_proxy_route"
 # normal -- an adapter can be busy mid-connect, or the panel between
 # advertising intervals -- so warning on the first one would cry wolf.
 NO_ROUTE_MISSES_BEFORE_WARNING = 3
+
+# Repair-issue id raised when the panel keeps refusing to encrypt a link that
+# did come up. It is the opposite fault to ISSUE_NO_ROUTE: there nothing can
+# get near the panel, here we get all the way to its door and are turned away.
+# The advice differs completely, so the two must never stand in for one
+# another -- which is why this one counts only sessions that reached GATT (see
+# TrumaCoordinator._async_note_encryption_failure).
+ISSUE_LOST_BOND = "lost_bond"
+# Consecutive such sessions before raising it. Same reasoning as
+# NO_ROUTE_MISSES_BEFORE_WARNING and the same number: one refusal can be the
+# tail of a session the panel was still tearing down. At a 300 s poll interval
+# three of them are a quarter of an hour -- against the 41 hours this fault
+# went unreported on 2026-09-28.
+ENCRYPTION_FAILURES_BEFORE_WARNING = 3
+
+# The wording an "Insufficient encryption" refusal arrives with.
+#
+# Matched on text rather than on a status code because the code never reaches
+# us: bleak's backends fold the ATT status into the message of a plain
+# BleakError and keep no field for it. Measured on the van (2026-09-28) the
+# message is "GATT Error handle=35 error=15 Insufficient encryption"; the
+# number is not matched on by itself, because "error=15" is also a prefix of
+# every three-digit code.
+#
+# Only ATT 0x0f (insufficient encryption) belongs here, never 0x05
+# (insufficient authentication). 0x05 means the panel does not know us at all
+# -- an ordinary unbonded state with ordinary pairing as its remedy -- while
+# 0x0f is only ever sent to a peer the panel still holds a key for, and that
+# asymmetry is the entire evidence this issue rests on (REV-007).
+ENCRYPTION_FAILURE_MARKERS = ("insufficient encryption",)
+
+
+def is_encryption_failure(exc: BaseException) -> bool:
+    """Return True when this exception is the panel refusing to encrypt."""
+    text = str(exc).lower()
+    return any(marker in text for marker in ENCRYPTION_FAILURE_MARKERS)
