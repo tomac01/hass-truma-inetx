@@ -16,7 +16,8 @@ What it pins:
    empty list is healthy and a non-empty one is a problem, and the fault code
    beside it carries what the appliance said about that fault,
 3. the reset button is offered only by an appliance raising a fault it calls
-   resettable, and presses at that appliance's own address,
+   resettable *and* describing the reset as writable, and presses at that
+   appliance's own address,
 4. the timer switch writes the panel's own timer state,
 5. the panel's display controls are configuration, and their range is the
    panel's own -- except where the panel describes the width of the field
@@ -169,6 +170,66 @@ def test_the_reset_button_waits_for_a_fault_that_can_be_reset() -> None:
 
     asyncio.run(button.async_press())
     assert coordinator.writes == [(HEATER, "ErrorReset", "Req", 1)]
+
+
+# What a Combi 6 E said about itself on 0.9.0b19 (#36): a fault it calls
+# clearable, and the parameter that clears it described as read-only. The
+# appliance contradicts itself, and this is measured rather than constructed --
+# the panel names the code in its own catalogue as E517H, "Gasflasche leer".
+GAS_EMPTY = [{"sev": 2, "code": 517, "resettable": 1}]
+
+
+def test_the_reset_button_is_not_offered_where_the_write_is_refused() -> None:
+    coordinator = _coordinator()
+    made = stubs.setup_platform(BUTTON, coordinator)
+    coordinator.describe("ErrorReset", "Req", HEATER, type=104, perm=0, avail=1, v=0)
+    coordinator.report("ErrorReset", "ErrCode", GAS_EMPTY, HEATER)
+    button = _by_key(made, "error_reset")
+    coordinator.data.connected = True
+
+    assert button.available is False, (
+        "offered a reset the appliance describes as read-only"
+    )
+
+    # ...and the reason it must not be offered: the press cannot do anything
+    # but raise. The same claim is what refuses it, which is why availability
+    # asks the same question rather than a second one that could drift.
+    try:
+        asyncio.run(button.async_press())
+    except RuntimeError as err:
+        assert "read-only" in str(err), err
+    else:
+        raise AssertionError("a read-only parameter accepted a write")
+    assert coordinator.writes == []
+
+
+def test_a_reset_the_appliance_never_described_keeps_its_button() -> None:
+    """Silence is not a refusal -- see ``Device.writable``.
+
+    Every vehicle measured before #36 reported ``ErrorReset.Req`` bare, with
+    no description at all, and the van's button worked. Reading an absent
+    ``perm`` as read-only would have withheld the control on every one of
+    them, invisibly, which is the failure the second gate must not become.
+    """
+    coordinator = _coordinator()
+    made = stubs.setup_platform(BUTTON, coordinator)
+    coordinator.report("ErrorReset", "Req", 0, HEATER)
+    coordinator.report("ErrorReset", "ErrCode", GAS_EMPTY, HEATER)
+    button = _by_key(made, "error_reset")
+    coordinator.data.connected = True
+
+    assert button.available is True
+    asyncio.run(button.async_press())
+    assert coordinator.writes == [(HEATER, "ErrorReset", "Req", 1)]
+
+    # A device that describes it and permits it is the third spelling, and it
+    # is offered too.
+    other = _coordinator()
+    made = stubs.setup_platform(BUTTON, other)
+    other.describe("ErrorReset", "Req", HEATER, type=104, perm=1, avail=1, v=0)
+    other.report("ErrorReset", "ErrCode", GAS_EMPTY, HEATER)
+    other.data.connected = True
+    assert _by_key(made, "error_reset").available is True
 
 
 def test_the_timer_can_be_switched_off_from_here() -> None:

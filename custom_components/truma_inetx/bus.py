@@ -306,12 +306,19 @@ class Device:
         ahead. Only an explicit 0 is a refusal, and nothing is gated on ``perm``
         being present.
 
-        That inference is deliberately used only to refuse a write with a
-        message naming the claim, never to withhold a control. Withholding one
-        on a guess is the failure this repo has already paid for twice (the
-        electric select and the diesel switch, both offered against hardware
-        that had neither), and a wrong guess here would be invisible; a
-        refusal that quotes the panel gets reported the same day.
+        Silence is never used to withhold a control. Withholding one on a guess
+        is the failure this repo has already paid for twice (the electric
+        select and the diesel switch, both offered against hardware that had
+        neither), and a wrong guess here would be invisible; a refusal that
+        quotes the panel gets reported the same day.
+
+        An explicit ``perm: 0`` is not a guess, and ``button.py`` does withhold
+        on it: a Combi 6 E called a fault resettable and the parameter that
+        clears it read-only in the same breath (#36), so the reset button was
+        offered and the press was refused by ``validate_write`` below. A
+        control whose only possible outcome is that refusal is worth not
+        offering. The distinction is the whole reason this returns three values
+        rather than two.
         """
         perm = self.meta(topic, param).get("perm")
         if not isinstance(perm, int):

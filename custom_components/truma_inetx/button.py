@@ -54,21 +54,46 @@ class TrumaResetButton(TrumaParamEntity, ButtonEntity):
     one while the panel's own list stayed empty.
 
     Available only while that appliance is raising something it calls
-    resettable. That is a gate on the device's own word, not on a guess --
-    each entry in ``ErrCode`` carries its own ``resettable`` flag, and
+    resettable *and* describes the reset parameter as writable. Both are
+    gates on the device's own word, not on a guess, and an appliance can
+    fail either one.
+
+    Each entry in ``ErrCode`` carries its own ``resettable`` flag, and
     measured on the van a window opened above the heater gives::
 
         [{"sev": 1, "code": 412, "resettable": 0}]
 
-    which is a fault to go and fix rather than to acknowledge. Offering a
-    button that the appliance has said will not work is worse than not
-    offering one: it is a control that silently does nothing.
+    which is a fault to go and fix rather than to acknowledge.
+
+    The second gate is there because a Combi 6 E said both things at once
+    (#36). It raised a fault it called clearable and described the parameter
+    that clears it as read-only::
+
+        ErrCode         [{"sev": 2, "code": 517, "resettable": 1}]
+        ErrorReset.Req  {"type": 104, "perm": 0, "avail": 1}
+
+    so the button appeared, and the press was refused by the write
+    validation quoting the panel's own ``perm`` -- correctly, and only after
+    the user had pressed it. The appliance contradicts itself; the button
+    believes the stricter half.
+
+    Offering a button that the appliance has said will not work is worse
+    than not offering one: it is a control that silently does nothing.
     """
 
     @property
     def available(self) -> bool:
         """Whether this appliance has a fault it says it can clear."""
         if not super().available:
+            return False
+        # Asked of the device that would receive the press, and by the same
+        # question the write validation asks, so the button cannot be offered
+        # for a write that is already known to be refused. Only an explicit
+        # ``perm: 0`` withholds it: a parameter the device never described
+        # reads ``None`` here and keeps its button, because withholding a
+        # control on silence is the failure this repo has paid for twice.
+        dest = self.bus.write_authority(self._addr, self._topic, self._param)
+        if dest is not None and dest.writable(self._topic, self._param) is False:
             return False
         errors = self.device.get(self._topic, _ERROR_PARAM)
         if not isinstance(errors, list):
