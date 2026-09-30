@@ -1775,10 +1775,51 @@ def test_a_handed_off_pairing_link_is_adopted_at_once() -> None:
 
     new = _reloaded(old)
     new._initial_client = _Client()
+    new._initial_client.is_connected = True
     attempts, settles = _first_dial(new)
 
     assert settles == [], settles
     assert attempts == [now], attempts
+
+
+def test_a_handed_off_link_that_dropped_keeps_the_distance() -> None:
+    """Ist der übergebene Link schon gefallen, ist die nächste Anwahl eine neue.
+
+    Etwa ein Re-Pair über „Neu konfigurieren": Das Entladen schließt den alten
+    Link, der übergebene fällt in der Lücke bis zum Setup -- und ohne Pause
+    wählte die Schleife Sekunden nach dem Abbau neu an.
+    """
+    old = _make_coord(poll_interval=300)
+    ended = _session_then_stop(old)
+    old.clock.now += 4
+
+    new = _reloaded(old)
+    new._initial_client = _Client()
+    new._initial_client.is_connected = False
+    attempts, settles = _first_dial(new)
+
+    assert settles == [26.0], settles
+    assert attempts == [ended[0] + 30.0], attempts
+
+
+def test_the_distance_follows_the_panel_not_the_entry() -> None:
+    """Entry gelöscht und neu angelegt: neue Entry-ID, dasselbe Panel.
+
+    Der Abstand schützt das Panel; an der Entry-ID festgemacht, begänne ein
+    neu angelegter Entry ohne Pause.
+    """
+    old = _make_coord(poll_interval=300)
+    ended = _session_then_stop(old)
+    old.clock.now += 4
+
+    other_entry = _Entry(unique_id=PANEL, options={COORD.CONF_POLL_INTERVAL: 300},
+                         entry_id="02")
+    new = _Coord(old.hass, other_entry, ADDRESS)
+    COORD.asyncio = _FastForward(old.clock, new)
+    attempts, settles = _first_dial(new)
+
+    assert settles == [26.0], settles
+    assert attempts == [ended[0] + 30.0], attempts
 
 
 def test_a_stop_during_the_distance_dials_nothing() -> None:

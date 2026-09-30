@@ -126,8 +126,9 @@ _WRITE_CONNECT_TIMEOUT = 75  # seconds
 # task parked inside a connect attempt -- and it is spent by Home Assistant
 # unloading the config entry, which is why it is short rather than generous.
 _SESSION_EXIT_TIMEOUT = 5.0  # seconds
-# Wie lange nach dem Ende einer Sitzung ein Reload frühestens folgt, der eine
-# geänderte Option wirksam macht. Ein Reload mitten in der Sitzung ließ das
+# Wie lange nach dem Ende einer Sitzung frühestens wieder angewählt wird: vor
+# einem Reload, der eine geänderte Option wirksam macht, und nach jedem Reload
+# vor der ersten Anwahl des neuen Coordinators. Ein Reload mitten in der Sitzung ließ das
 # Panel zweimal keine Verbindung mehr annehmen, bis es stromlos war (REV-007,
 # 25.09. und 30.09.2026); am 30.09. kam der Neuaufbau 4 s nach dem Abbau. Den
 # Mechanismus kennen wir nicht. 30 s ist der kürzeste Abstand zwischen einem
@@ -135,7 +136,9 @@ _SESSION_EXIT_TIMEOUT = 5.0  # seconds
 # gelungen ist -- kein Rechenwert, eine Beobachtung.
 _RELOAD_SETTLE_SECONDS = 30.0
 # Unter diesem Schlüssel in ``hass.data[DOMAIN]`` überlebt das Ende der letzten
-# Sitzung eines Entries dessen Reload: Entry-ID -> ``hass.loop.time()``.
+# Sitzung einen Reload: Panel-Kennung (``unique_id``) -> ``hass.loop.time()``.
+# Am Panel festgemacht, nicht am Entry: geschützt wird das Panel, und ein
+# gelöschter und neu angelegter Entry hat eine neue ID, aber dasselbe Panel.
 _SESSION_ENDS = "session_ended_at"
 _STORAGE_VERSION = 1
 
@@ -1056,7 +1059,7 @@ class TrumaCoordinator(DataUpdateCoordinator[Bus]):
         now = self.hass.loop.time()
         self._session_ended_at = now
         ends = self.hass.data.setdefault(DOMAIN, {}).setdefault(_SESSION_ENDS, {})
-        ends[self.config_entry.entry_id] = now
+        ends[self.unique_id] = now
 
     async def _keep_distance_after_reload(self) -> None:
         """Vor der ersten Anwahl Abstand zur letzten Sitzung dieses Entries halten.
@@ -1070,13 +1073,16 @@ class TrumaCoordinator(DataUpdateCoordinator[Bus]):
         Verbindung mehr an (REV-007). Also frühestens
         ``_RELOAD_SETTLE_SECONDS`` nach dem Ende der letzten Sitzung anwählen.
 
-        Ein übergebener Pairing-Link wartet nicht: er ist keine neue Anwahl,
-        und ein Link, den niemand hält, fällt. Ein Stop beendet die Pause; die
-        Schleife danach fängt dann gar nicht erst an.
+        Ein übergebener Pairing-Link, der noch steht, wartet nicht: er ist
+        keine neue Anwahl, und ein Link, den niemand hält, fällt. Ist er schon
+        gefallen -- etwa bei einem Re-Pair, wenn er in der Lücke bis zum Setup
+        abreißt --, ist die nächste Anwahl eine neue und hält Abstand. Ein Stop
+        beendet die Pause; die Schleife danach fängt dann gar nicht erst an.
         """
         ends = self.hass.data.get(DOMAIN, {}).get(_SESSION_ENDS, {})
-        ended = ends.get(self.config_entry.entry_id)
-        if ended is None or self._initial_client is not None:
+        ended = ends.get(self.unique_id)
+        initial = self._initial_client
+        if ended is None or (initial is not None and initial.is_connected):
             return
         self._session_ended_at = ended
         remaining = ended + _RELOAD_SETTLE_SECONDS - self.hass.loop.time()

@@ -214,6 +214,8 @@ def test_an_unadopted_pairing_link_is_closed_too() -> None:
         await c.async_stop()
         assert handoff.closed == 1, "the handed-off link was left open"
         assert c._initial_client is None, "a closed link is still referenced"
+        # A link ended here, so the next coordinator must keep its distance.
+        assert c.session_end_noted, "closing the handed-off link was not noted"
 
     asyncio.run(run())
 
