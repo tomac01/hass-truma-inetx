@@ -7,8 +7,9 @@ hardware -- see ``bus._main()`` -- which is the only way to debug the protocol
 without a Home Assistant install in the way.
 
 Everything here takes the transport as an argument. ``client`` is anything with
-``assigned_addr``, ``connected`` and an awaitable ``send(frame, probe=False)``;
-``ble.TrumaBleClient`` is the real one and the tests pass a recorder.
+``assigned_addr``, ``registered``, ``connected`` and an awaitable
+``send(frame, probe=False)``; ``ble.TrumaBleClient`` is the real one and the
+tests pass a recorder.
 """
 
 from __future__ import annotations
@@ -19,7 +20,6 @@ from .bus import Bus, MeasureMiss
 from .const import LOGGER
 from .truma.const import (
     CTRL_MBP,
-    DEV_APP_DEFAULT,
     DEV_BROADCAST,
     DEV_MSG_BROKER,
     DEVICE_SEED,
@@ -80,10 +80,20 @@ async def run_startup(client, bus: Bus, identity: dict, name: str, now) -> None:
     everything after it depends on the answer.
     """
     # 1. Register and wait for an assigned address.
+    #
+    # What is waited for is the panel *answering*, not the address changing.
+    # DEV_APP_DEFAULT is the address we register from, and it is also an
+    # address the panel is free to hand back: measured on a reporter's vehicle
+    # (issue #20), the registration response carried ``{"addr": 0x0500}`` and
+    # the panel then addressed us there for the rest of the session. Waiting
+    # for the value to differ could not tell that apart from silence, so a
+    # session that had registered perfectly well was dropped by the gate below
+    # and retried forever -- every 0.7.0b3 and later install on such a panel.
+    client.registered = False
     await client.send(build_register_frame(client.assigned_addr))
     for _ in range(_REGISTER_TIMEOUT):
         await asyncio.sleep(1)
-        if client.assigned_addr != DEV_APP_DEFAULT:
+        if client.registered:
             break
         if not client.connected:
             # The transport gave up on this session under us (see
@@ -381,6 +391,7 @@ def handle_frame(bus: Bus, parsed: dict, client=None, name: str = "") -> bool:
         addr = cbor.get("addr")
         if addr and client is not None:
             client.assigned_addr = addr
+            client.registered = True
             bus.assigned_addr = addr
         return False
 

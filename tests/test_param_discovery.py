@@ -99,8 +99,18 @@ class _Client:
     discovery request replies, and the reply carries its own source address.
     """
 
-    def __init__(self, coord, answers: dict[int, int] | None = None) -> None:
+    def __init__(
+        self,
+        coord,
+        answers: dict[int, int] | None = None,
+        registers_as: int | None = APP_ADDR,
+    ) -> None:
         self.assigned_addr = APP_ADDR
+        # The address the panel assigns when we register, or None for a panel
+        # that never answers -- which is what a link carrying nothing looks
+        # like from up here.
+        self.registers_as = registers_as
+        self.registered = False
         # A link that carries nothing is still connected as far as the stack
         # is concerned; only the transport giving up clears this.
         self.connected = True
@@ -111,6 +121,12 @@ class _Client:
     async def send(self, frame: bytes, *, probe: bool = False) -> bool:
         self.sent.append(frame)
         parsed = PROTO.parse_v3_frame(frame)
+        if (
+            parsed["control_raw"] == TC.CTRL_REGISTRATION
+            and self.registers_as is not None
+        ):
+            self.assigned_addr = self.registers_as
+            self.registered = True
         speaker = self._answers.get(parsed["dest"])
         if speaker is not None:
             self._coord._on_frame({"src": speaker, "dest": APP_ADDR})
@@ -305,7 +321,6 @@ def test_broadcast_answer_reaches_an_unseeded_device() -> None:
 def test_startup_runs_discovery_without_paying_per_device() -> None:
     coord = _Coord()
     client = _Client(coord)
-    client.assigned_addr = APP_ADDR  # already registered: skip the wait loop
 
     before = len(client.sent)
     slept = _run(coord._run_startup(client))
@@ -337,10 +352,7 @@ def test_a_link_that_carries_nothing_is_dropped_at_once() -> None:
     "connected" until the 90 s stall watchdog finally noticed.
     """
     coord = _Coord()
-    client = _Client(coord)
-    # The panel answers registration by assigning an address. Leaving it at
-    # the default is exactly what a link carrying nothing looks like.
-    client.assigned_addr = TC.DEV_APP_DEFAULT
+    client = _Client(coord, registers_as=None)
 
     raised = None
     try:
@@ -356,6 +368,30 @@ def test_a_link_that_carries_nothing_is_dropped_at_once() -> None:
     assert _discovery_dests(client) == [], "discovery ran on a dead link"
 
 
+def test_the_panel_may_assign_us_the_address_we_registered_from() -> None:
+    """Issue #20: 0x0500 is an address the panel can hand out, not "none".
+
+    Measured by a reporter on hardware -- the registration response carried
+    ``{"pv": [5, 1], "addr": 0x0500}`` and the panel then addressed frames to
+    us at 0x0500. Startup used to wait for ``assigned_addr`` to *differ* from
+    DEV_APP_DEFAULT, which that answer never does, so every such install sat
+    out the 20 s timeout, had its perfectly good session dropped by the gate
+    above, and reconnected forever.
+    """
+    coord = _Coord()
+    client = _Client(coord, registers_as=TC.DEV_APP_DEFAULT)
+    # Where a real client sits before the panel answers: the address it
+    # registers *from*, which is the whole trap.
+    client.assigned_addr = TC.DEV_APP_DEFAULT
+
+    _run(coord._run_startup(client))
+
+    assert client.assigned_addr == TC.DEV_APP_DEFAULT
+    assert set(TC.DEVICE_SEED) <= set(_discovery_dests(client)), (
+        "startup gave up on a panel that assigned us the default address"
+    )
+
+
 def test_registration_gives_up_when_the_transport_ends_the_session() -> None:
     """An invalidated transport must not be waited out for the full timeout.
 
@@ -366,8 +402,7 @@ def test_registration_gives_up_when_the_transport_ends_the_session() -> None:
     of the registration timeout only holds the adapter's connection slot.
     """
     coord = _Coord()
-    client = _Client(coord)
-    client.assigned_addr = TC.DEV_APP_DEFAULT
+    client = _Client(coord, registers_as=None)
     client.connected = False
 
     raised = None
@@ -384,7 +419,7 @@ def test_a_registered_link_still_runs_startup() -> None:
     """The gate must not fire on a panel that answered."""
     coord = _Coord()
     client = _Client(coord)
-    assert client.assigned_addr != TC.DEV_APP_DEFAULT
+    assert client.registers_as is not None
     _run(coord._run_startup(client))
     assert set(TC.DEVICE_SEED) <= set(_discovery_dests(client))
 
@@ -419,7 +454,7 @@ def test_a_discovery_nothing_acknowledges_is_dropped() -> None:
     """
     coord = _Coord()
     client = _SilentClient(coord)
-    assert client.assigned_addr != TC.DEV_APP_DEFAULT, "registration must pass"
+    assert client.registers_as is not None, "registration must pass"
 
     raised = None
     try:

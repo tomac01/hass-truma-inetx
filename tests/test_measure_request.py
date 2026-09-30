@@ -113,6 +113,10 @@ class _Client:
         # acknowledgement for a frame addressed to a device that is not there.
         self._acks_measure = acks_measure
         self.assigned_addr = APP_ADDR
+        # Set when the panel answers registration; startup waits for it rather
+        # than for the address to change, because the address it hands back
+        # may be the one we registered from (session.run_startup).
+        self.registered = False
         self.sent: list[tuple[float, dict]] = []
         self._coord = coord
         self._clock = clock
@@ -143,6 +147,8 @@ class _Client:
         # and disconnects (ble._send_locked).
         parsed["probe"] = probe
         self.sent.append((self._clock.now, parsed))
+        if parsed["control_raw"] == TC.CTRL_REGISTRATION:
+            self.registered = True
         cbor = parsed.get("cbor") or {}
         if cbor.get("pn") == TC.MEASURE_REQUEST_PARAM and not self._acks_measure:
             return False

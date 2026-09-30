@@ -189,6 +189,10 @@ class TrumaBleClient:
         self._receive_size: int | None = None
         self._receive_buffer = bytearray()
         self.assigned_addr = DEV_APP_DEFAULT
+        # Whether the panel has answered registration on this session. It is
+        # its own flag because the address it hands back may be the one we
+        # registered from -- see session.run_startup.
+        self.registered = False
 
     def on_data(self, callback: Callable[[dict], None]) -> None:
         """Register a callback for decoded V3 frames."""
@@ -574,5 +578,6 @@ class TrumaBleClient:
                 # write that reports success into thin air.
                 self._transport_invalidated = True
                 self.assigned_addr = DEV_APP_DEFAULT
+                self.registered = False
                 await self.disconnect()
         return success
