@@ -287,6 +287,7 @@ def test_a_setup_that_fails_late_stops_the_session_it_started() -> None:
             # tests/test_options_reload.py nagelt ihn fest, hier reicht es,
             # dass die beiden Aufrufe ins Leere laufen duerfen.
             entry = SimpleNamespace(data={"address": "AA:BB:CC:DD:EE:FF"},
+                                    options={},
                                     runtime_data=None,
                                     add_update_listener=lambda _l: (lambda: None),
                                     async_on_unload=lambda _u: None)

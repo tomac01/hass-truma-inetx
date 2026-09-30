@@ -302,6 +302,10 @@ class TrumaCoordinator(DataUpdateCoordinator[Bus]):
         self._manual_operation: int | None = None
         # Von der Number-Entität gesetzt, vom Sync-Button gelesen (Task 10).
         self.manual_live_minutes = 0
+        # Stand der Optionen, gegen den der Update-Listener vergleicht. Gefüllt
+        # wird er erst beim Anmelden des Listeners (siehe __init__.py): nur
+        # dort beginnen Kopie und Zuhören im selben Moment.
+        self.known_options: dict = {}
 
     def _hold_after_command(self) -> None:
         """Den Link nach einem Befehl offen halten.

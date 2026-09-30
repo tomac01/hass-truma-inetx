@@ -70,19 +70,45 @@ async def _async_register_card(hass: HomeAssistant) -> None:
 
 
 async def _async_update_listener(hass: HomeAssistant, entry: TrumaConfigEntry) -> None:
-    """Optionen neu einlesen, indem der Eintrag neu geladen wird.
+    """Nur bei wirklich geänderten Optionen den Eintrag neu laden.
 
     Der Coordinator liest ``poll_interval`` nur beim Betreten seiner
     Session-Schleife. Ohne diesen Reload bliebe eine Umstellung zwischen
     Dauerverbindung und Poll-Betrieb wirkungslos, bis die Verbindung von
     selbst abreißt — im Dauerbetrieb also womöglich tagelang.
+
+    Der Vergleich davor ist kein Feinschliff, sondern der Grund, warum diese
+    Funktion mehr als eine Zeile ist: Home Assistant ruft Update-Listener bei
+    *jeder* Änderung des Config-Entries auf, auch wenn die Bluetooth-Discovery
+    bloß ``entry.data[CONF_ADDRESS]`` auf die neue RPA nachzieht. Ein Reload
+    darauf hebelt ``reload_on_update=False`` im Discovery-Pfad von
+    ``config_flow.py`` (Zeilen 138–141) aus und kostete auf dem Fahrzeug
+    gemessen rund alle 15 Minuten einen vollständigen Reload, jeder mit
+    Entitäts-Ausfall und Sitzungsabbruch (REV-007).
+
+    Die Kopie wird *vor* dem Reload nachgezogen: ``async_reload`` ist ein
+    ``await``, und ein zweiter Listener-Aufruf in diesem Fenster soll keinen
+    zweiten Reload stapeln.
     """
+    coordinator = entry.runtime_data
+    options = dict(entry.options)
+    if options == coordinator.known_options:
+        return
+    coordinator.known_options = options
     await hass.config_entries.async_reload(entry.entry_id)
 
 
 @callback
 def _async_register_update_listener(entry: TrumaConfigEntry) -> None:
-    """Den Listener anmelden und fürs Entladen vormerken."""
+    """Den Listener anmelden und fürs Entladen vormerken.
+
+    Die Optionskopie entsteht in derselben synchronen Funktion, die das
+    Zuhören beginnt. Läge sie früher — etwa im Coordinator-Konstruktor —,
+    stünden zwei ``await`` dazwischen: eine Optionsänderung in diesem Fenster
+    verpuffte ungehört und ließe die Kopie zugleich veralten, sodass der
+    nächste Adresswechsel doch einen Reload auslöste.
+    """
+    entry.runtime_data.known_options = dict(entry.options)
     entry.async_on_unload(entry.add_update_listener(_async_update_listener))
 
 
