@@ -100,7 +100,7 @@ inline TrumaBondSnapshot truma_ble_bond_snapshot() {
 
 // Fordert das Loeschen ALLER Bonds aus dem Bluedroid-Speicher (NVS) an und
 // liefert die Zahl der angenommenen Loeschauftraege, oder einen negativen Wert,
-// wenn die Liste nicht lesbar war. esp_ble_remove_bond_device() arbeitet
+// wenn Anzahl oder Liste nicht lesbar waren. esp_ble_remove_bond_device() arbeitet
 // asynchron: ESP_OK heisst "Auftrag angenommen", nicht "geloescht".
 // Nur fuer gezielte Neukopplungen gedacht: Danach kann
 // der Proxy das Panel erst wieder erreichen, wenn neu gekoppelt wurde.

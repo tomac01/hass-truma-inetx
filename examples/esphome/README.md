@@ -18,7 +18,7 @@ man suchen muss.
 | Entität | Art | Bedeutung |
 |---|---|---|
 | **BLE-Bonds** | Sensor (Diagnose) | Zahl der im ESP gespeicherten Kopplungen |
-| **BLE-Bond-Liste** | Textsensor (Diagnose) | deren Adressen, oder `keine` |
+| **BLE-Bond-Liste** | Textsensor (Diagnose) | deren Adressen, `keine`, oder `nicht lesbar` |
 | **BLE-Bond vorhanden** | Binärsensor (Diagnose) | an, sobald mindestens eine Kopplung gespeichert ist |
 | **Neu starten** | Knopf | startet den ESP neu, der Bond bleibt erhalten |
 | **BLE-Bonds löschen** | Knopf, standardmäßig deaktiviert | löscht alle Kopplungen des ESP |
@@ -40,6 +40,22 @@ Wer schon eine eigene Proxy-Konfiguration hat, übernimmt nur den Eintrag
 `includes:` unter `esphome:` und alles ab `button:`. Voraussetzung ist
 `framework: type: esp-idf` mit dem Bluedroid-Stack; der Header bricht den Build
 mit einer klaren Meldung ab, wenn Bluedroid fehlt.
+
+**OTA und Fallback-AP haben kein Passwort.** Das ESPHome-Paket richtet
+OTA-Updates (`esphome` und `web_server`) und einen WLAN-Fallback-AP ein, ohne
+ein Passwort zu setzen; das Beispiel ergänzt nur den API-Schlüssel. Wer das
+absichern will, ergänzt die Passwörter selbst (validiert mit ESPHome 2026.9.1;
+der OTA-Weg über `web_server` ist davon nicht erfasst):
+
+```yaml
+ota:
+  - id: !extend ota_esphome
+    password: !secret ota_password
+
+wifi:
+  ap:
+    password: !secret fallback_ap_password
+```
 
 **Ein bereits gekoppelter Proxy wird per OTA aktualisiert, nicht per USB.** Ein
 USB-Flash, der den Flash-Speicher löscht, nimmt den Bond mit, und das Panel
@@ -70,7 +86,8 @@ Die YAML ist mit ESPHome 2026.9.1 validiert (`esphome config`) und kompiliert
 (`esphome compile`, ESP-IDF 5.5.5). Geflasht wurde sie in genau dieser Form
 nicht: Auf dem Proxy dieses Forks laufen Bond-Anzeige und Neustart-Knopf seit
 Ende September 2026 als derselbe Code unter anderen Bezeichnern und
-Gerätenamen. Der Knopf **BLE-Bonds löschen** ist am Gerät nicht erprobt.
+Gerätenamen — bis auf den Fall einer nicht lesbaren Bond-Liste, den nur das
+Beispiel eigens anzeigt. Der Knopf **BLE-Bonds löschen** ist am Gerät nicht erprobt.
 
 ---
 
@@ -94,7 +111,7 @@ like.
 | Entity | Kind | Meaning |
 |---|---|---|
 | **BLE-Bonds** | sensor (diagnostic) | number of pairings stored on the ESP |
-| **BLE-Bond-Liste** | text sensor (diagnostic) | their addresses, or `keine` (none) |
+| **BLE-Bond-Liste** | text sensor (diagnostic) | their addresses, `keine` (none), or `nicht lesbar` (unreadable) |
 | **BLE-Bond vorhanden** | binary sensor (diagnostic) | on once at least one pairing is stored |
 | **Neu starten** | button | restarts the ESP; the bond survives |
 | **BLE-Bonds löschen** | button, disabled by default | deletes every pairing on the ESP |
@@ -115,6 +132,22 @@ If you already have a proxy configuration of your own, take only the
 `includes:` entry under `esphome:` and everything from `button:` on. It needs
 `framework: type: esp-idf` with the Bluedroid stack; the header stops the build
 with a clear message if Bluedroid is missing.
+
+**OTA and the fallback AP have no password.** The ESPHome package sets up OTA
+updates (`esphome` and `web_server`) and a Wi-Fi fallback AP without setting a
+password; the example only adds the API key. If you want them protected, add
+the passwords yourself (validates with ESPHome 2026.9.1; OTA through
+`web_server` is not covered by this):
+
+```yaml
+ota:
+  - id: !extend ota_esphome
+    password: !secret ota_password
+
+wifi:
+  ap:
+    password: !secret fallback_ap_password
+```
 
 **Update a proxy that is already paired over OTA, not over USB.** A USB flash
 that erases the flash memory takes the bond with it, and the panel has to be
@@ -145,5 +178,6 @@ The YAML validates with ESPHome 2026.9.1 (`esphome config`) and compiles
 (`esphome compile`, ESP-IDF 5.5.5). It has not been flashed in exactly this
 form: this fork's proxy has been running the bond display and the restart
 button as the same code under other identifiers and device names since the end
-of September 2026. The **BLE-Bonds löschen** button has not been tried on a
+of September 2026 — except for an unreadable bond list, which only the example
+reports as such. The **BLE-Bonds löschen** button has not been tried on a
 device.

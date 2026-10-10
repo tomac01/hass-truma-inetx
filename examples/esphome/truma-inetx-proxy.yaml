@@ -65,7 +65,7 @@ button:
       - lambda: |-
           const int requested = truma_ble_remove_all_bonds();
           if (requested < 0) {
-            ESP_LOGW("truma_bond", "Bond-Liste nicht lesbar, nichts geloescht");
+            ESP_LOGW("truma_bond", "Bond-Abfrage fehlgeschlagen, nichts geloescht");
           } else {
             ESP_LOGW("truma_bond", "Loeschen von %d BLE-Bonds angefordert", requested);
           }
@@ -121,6 +121,8 @@ interval:
             id(ble_bond_list).publish_state("keine");
           } else if (!snap.list.empty()) {
             id(ble_bond_list).publish_state(snap.list);
+          } else {
+            // Anzahl > 0, aber Liste nicht lesbar: das sagen, statt einen
+            // leeren oder einen veralteten Wert neben der Anzahl zu zeigen.
+            id(ble_bond_list).publish_state("nicht lesbar");
           }
-          // Anzahl > 0, aber Liste nicht lesbar: alten Listenwert stehen
-          // lassen statt einen leeren zu veroeffentlichen.
