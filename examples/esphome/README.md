@@ -42,10 +42,12 @@ Wer schon eine eigene Proxy-Konfiguration hat, übernimmt nur den Eintrag
 mit einer klaren Meldung ab, wenn Bluedroid fehlt.
 
 **OTA und Fallback-AP haben kein Passwort.** Das ESPHome-Paket richtet
-OTA-Updates (`esphome` und `web_server`) und einen WLAN-Fallback-AP ein, ohne
-ein Passwort zu setzen; das Beispiel ergänzt nur den API-Schlüssel. Wer das
-absichern will, ergänzt die Passwörter selbst (validiert mit ESPHome 2026.9.1;
-der OTA-Weg über `web_server` ist davon nicht erfasst):
+OTA-Updates (`esphome`) und einen WLAN-Fallback-AP ein, ohne ein Passwort zu
+setzen. `captive_portal:` im Beispiel lädt zusätzlich einen zweiten OTA-Weg
+über `web_server` nach, ebenfalls ohne Passwort; wer ihn nicht will, lässt
+`captive_portal:` weg. Für die beiden anderen lassen sich Passwörter ergänzen
+(validiert mit ESPHome 2026.9.1; auf den `web_server`-Weg wirkt das
+OTA-Passwort nicht):
 
 ```yaml
 ota:
@@ -134,10 +136,11 @@ If you already have a proxy configuration of your own, take only the
 with a clear message if Bluedroid is missing.
 
 **OTA and the fallback AP have no password.** The ESPHome package sets up OTA
-updates (`esphome` and `web_server`) and a Wi-Fi fallback AP without setting a
-password; the example only adds the API key. If you want them protected, add
-the passwords yourself (validates with ESPHome 2026.9.1; OTA through
-`web_server` is not covered by this):
+updates (`esphome`) and a Wi-Fi fallback AP without setting a password.
+`captive_portal:` in the example pulls in a second OTA path through
+`web_server`, also without a password; leave `captive_portal:` out if you do
+not want it. Passwords can be added for the other two (validates with ESPHome
+2026.9.1; the OTA password does not apply to the `web_server` path):
 
 ```yaml
 ota:

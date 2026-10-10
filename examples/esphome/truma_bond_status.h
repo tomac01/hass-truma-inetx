@@ -88,8 +88,10 @@ inline TrumaBondSnapshot truma_ble_bond_snapshot() {
   }
 
   // 5. Wurden mehr Bonds gemeldet als in den Puffer passten, wird der Rest als
-  //    "+n" angehaengt statt stillschweigend verschluckt.
-  if (num > written) {
+  //    "+n" angehaengt statt stillschweigend verschluckt. Kam gar kein Eintrag
+  //    zurueck, bleibt die Liste leer - der Aufrufer meldet sie dann als nicht
+  //    lesbar.
+  if (written > 0 && num > written) {
     out += ",+";
     out += std::to_string(num - written);
   }
