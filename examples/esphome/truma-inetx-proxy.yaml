@@ -1,0 +1,117 @@
+# ESPHome-Bluetooth-Proxy fuer das Truma iNet X Panel, mit Bond-Anzeige.
+#
+# Der Proxy selbst ist Standard-Firmware aus dem ESPHome-Paket. Dazu kommen
+# drei Diagnose-Entitaeten, die zeigen, ob der Proxy seinen Kopplungsschluessel
+# (BLE-Bond) noch hat, und zwei Knoepfe. Naeheres in README.md.
+#
+# Neben dieser Datei gehoert `truma_bond_status.h` in dasselbe Verzeichnis --
+# `esphome: includes:` loest relativ zum Konfigurationsverzeichnis auf, und die
+# Validierung schlaegt fehl, wenn der Header fehlt.
+#
+# Wer schon eine eigene Proxy-Konfiguration hat, uebernimmt nur den Eintrag
+# `includes:` und alles ab `button:`.
+
+substitutions:
+  name: truma-inetx-proxy
+  friendly_name: Truma iNetX Proxy
+
+packages:
+  esphome.bluetooth-proxy: "github://esphome/bluetooth-proxies/esp32-generic/esp32-generic.yaml@main"
+
+esphome:
+  name: ${name}
+  name_add_mac_suffix: false
+  friendly_name: ${friendly_name}
+  includes:
+    - truma_bond_status.h
+
+api:
+  encryption:
+    key: !secret api_encryption_key
+
+captive_portal:
+
+improv_serial:
+
+# --- Neustart aus der Ferne -------------------------------------------------
+# Startet den ESP neu, ohne dass jemand ans Stromkabel muss. Der BLE-Bond
+# bleibt dabei erhalten.
+#
+# Er hilft NICHT, wenn das Panel selbst keine Verbindung mehr annimmt
+# (Proxy-Log: "OPEN_EVT in unexpected state" mit status=133). Dann hilft nur
+# das Stromlosmachen des Panels, siehe docs/limitations.md.
+#
+# Nicht zu verwechseln mit "Factory reset" aus dem Paket: der loescht die
+# gesamte NVS-Partition und damit den BLE-Bond.
+
+button:
+  - platform: restart
+    name: "Neu starten"
+    id: proxy_restart
+    icon: "mdi:restart"
+    entity_category: config
+
+  # Loescht die BLE-Bonds des Proxys -- danach erreicht er das Panel erst nach
+  # einer Neukopplung. Nur fuer gezielte Neukopplungen. Standardmaessig
+  # deaktiviert, damit ihn niemand versehentlich drueckt; vor der Benutzung in
+  # Home Assistant aktivieren, danach wieder deaktivieren.
+  - platform: template
+    name: "BLE-Bonds löschen"
+    id: proxy_clear_bonds
+    icon: "mdi:key-remove"
+    entity_category: config
+    disabled_by_default: true
+    on_press:
+      - lambda: |-
+          const int removed = truma_ble_remove_all_bonds();
+          ESP_LOGW("truma_bond", "BLE-Bonds geloescht: %d", removed);
+
+# --- BLE-Bond-Zustand sichtbar machen ---------------------------------------
+# Eine Messung je Minute, ein Schnappschuss, drei Entitaeten.
+# Die Adressen entstehen zur Laufzeit und stehen bewusst NICHT in dieser Datei.
+#
+# Die drei Entitaeten tragen absichtlich kein "lambda": ihr eigenes Polling
+# laeuft dadurch leer (template_sensor.cpp, template_text_sensor.cpp und
+# template_binary_sensor.cpp springen sofort zurueck, wenn keine Lambda
+# gesetzt ist). Gesetzt werden sie ausschliesslich aus dem interval-Block,
+# damit Anzahl, Liste und Binaerzustand aus EINEM Schnappschuss stammen und
+# nicht auseinanderlaufen koennen.
+
+sensor:
+  - platform: template
+    id: ble_bond_count
+    name: "BLE-Bonds"
+    icon: "mdi:key-chain-variant"
+    entity_category: diagnostic
+    accuracy_decimals: 0
+    state_class: measurement
+
+text_sensor:
+  - platform: template
+    id: ble_bond_list
+    name: "BLE-Bond-Liste"
+    icon: "mdi:format-list-bulleted"
+    entity_category: diagnostic
+
+binary_sensor:
+  - platform: template
+    id: ble_bond_present
+    name: "BLE-Bond vorhanden"
+    icon: "mdi:key"
+    entity_category: diagnostic
+
+interval:
+  - interval: 60s
+    then:
+      - lambda: |-
+          TrumaBondSnapshot snap = truma_ble_bond_snapshot();
+          if (snap.count < 0) {
+            // Bluedroid nicht bereit oder Abfrage fehlgeschlagen: lieber nichts
+            // melden als eine Null, die wie "Bond weg" aussieht.
+            ESP_LOGW("truma_bond", "Bond-Abfrage fehlgeschlagen, Werte bleiben stehen");
+            return;
+          }
+          id(ble_bond_count).publish_state((float) snap.count);
+          id(ble_bond_list).publish_state(snap.count > 0 ? snap.list
+                                                         : std::string("keine"));
+          id(ble_bond_present).publish_state(snap.count > 0);

@@ -18,6 +18,36 @@ its own cached RPA underneath, so `avoid` only ever demotes an address that
 never goes on air. It clears by itself — longest seen 15 minutes, no power-cycle
 needed.
 
+**Through an ESPHome proxy it has not always cleared by itself.** The btsnoop
+above is from a local adapter. On this fork's van, through a proxy, the same
+face appeared twice, both times when a reload ended the first session after a
+pairing:
+
+| Date | Blocked for | Ended by |
+|---|---|---|
+| 2026-09-25 | 14 minutes | power-cycling the panel |
+| 2026-09-30 | at least 38 minutes, a retry every 45–60 s throughout | power-cycling the panel |
+
+On 2026-09-30 reloading the ESPHome config entry changed nothing, and neither
+did restarting the ESP — Home Assistant listed all three of the proxy's
+connection slots as free afterwards and the next attempt failed the same way.
+About a minute after the panel had been without power the link was up, and a
+second connect after a clean disconnect worked too. So the state that blocks
+sits in the panel, and it is the panel that has to be power-cycled, not the
+proxy.
+
+What it looks like from this side: the proxy logs `OPEN_EVT in unexpected
+state` with `status=133` on every attempt, and Home Assistant turns that into
+`ESP_GATT_ERROR … Interference/range`. The second half of that text is not to
+be taken literally — the panel was heard at −57 to −73 dBm the whole time.
+
+What is not measured is whether it would have cleared had the retries stopped:
+the integration went on dialling throughout both times. And what sets it off
+is open. A clean session end followed by a redial 4.5 s later, and a proxy
+restarted in the middle of a session, both reconnected within about half a
+minute of dialling on 2026-09-30; the two blocks have in common that the
+session they ended was the first one after a pairing.
+
 A second failure used to wear the same face, one layer up, and is **fixed**. The
 link would come up, the panel would send a frame or two and then answer nothing
 while still announcing an incoming message every five seconds, and the session

@@ -68,6 +68,9 @@ bluetooth_proxy:
   active: true
 ```
 
+A complete example that also shows in Home Assistant whether the proxy still
+holds its pairing key is in [`examples/esphome`](../examples/esphome/README.md).
+
 Put the proxy **within a few metres of the panel**. Distance shows up as
 `ESP_GATT_CONN_FAIL_ESTABLISH` connect failures rather than a clean error.
 
