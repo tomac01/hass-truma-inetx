@@ -28,25 +28,29 @@ pairing:
 | 2026-09-25 | 14 minutes | power-cycling the panel |
 | 2026-09-30 | at least 38 minutes, a retry every 45–60 s throughout | power-cycling the panel |
 
+Only the second of these outlasted the 15 minutes above; the first was cut
+short before it could show whether it would have cleared.
+
 On 2026-09-30 reloading the ESPHome config entry changed nothing, and neither
-did restarting the ESP — Home Assistant listed all three of the proxy's
-connection slots as free afterwards and the next attempt failed the same way.
-About a minute after the panel had been without power the link was up, and a
+did restarting the ESP: the next attempt failed the same way. About a minute after the panel had been without power the link was up, and a
 second connect after a clean disconnect worked too. So the state that blocks
 sits in the panel, and it is the panel that has to be power-cycled, not the
 proxy.
 
-What it looks like from this side: the proxy logs `OPEN_EVT in unexpected
-state` with `status=133` on every attempt, and Home Assistant turns that into
-`ESP_GATT_ERROR … Interference/range`. The second half of that text is not to
-be taken literally — the panel was heard at −57 to −73 dBm the whole time.
+What it looked like from this side on 2026-09-30: the proxy logged `OPEN_EVT
+in unexpected state` with `status=133` on every attempt, and Home Assistant
+turned that into `ESP_GATT_ERROR … Interference/range`. The second half of that
+text is not to be taken literally — the panel was heard at −57 to −73 dBm the
+whole time.
 
 What is not measured is whether it would have cleared had the retries stopped:
 the integration went on dialling throughout both times. And what sets it off
 is open. A clean session end followed by a redial 4.5 s later, and a proxy
 restarted in the middle of a session, both reconnected within about half a
 minute of dialling on 2026-09-30; the two blocks have in common that the
-session they ended was the first one after a pairing.
+session they ended was the first one after a pairing. They also ended much
+longer sessions (4 minutes and 5 h 49 min, against 0.5–1.5 minutes in the two
+trials), which has not been ruled out as the difference.
 
 A second failure used to wear the same face, one layer up, and is **fixed**. The
 link would come up, the panel would send a frame or two and then answer nothing

@@ -53,7 +53,8 @@ muss neu gekoppelt werden.
 | Bonds = 0 | kommt nicht zustande | Der Proxy hat keinen Schlüssel (mehr). Am Panel den alten Eintrag löschen, dann neu koppeln ([Kopplung](../../docs/pairing.md)). |
 | Bonds ≥ 1 | kommt nicht zustande | Der Schlüssel ist da; der Fehler liegt nicht am Bond. Siehe [bekannte Einschränkungen](../../docs/limitations.md), Abschnitt „Reconnects can wedge“. |
 
-**Neu starten** hilft, wenn der Proxy selbst hängt. Er hilft nicht, wenn das
+**Neu starten** ist für den Fall gedacht, dass der Proxy selbst hängt
+(gemessen ist dafür bisher nur das Stromlosmachen des ESP). Er hilft nicht, wenn das
 Panel keine Verbindung mehr annimmt — dann ändert auch ein Neustart des ESP
 nichts, und das Panel muss stromlos gemacht werden.
 
@@ -67,8 +68,9 @@ Einstellungen unangetastet.
 
 Die YAML ist mit ESPHome 2026.9.1 validiert (`esphome config`) und kompiliert
 (`esphome compile`, ESP-IDF 5.5.5). Geflasht wurde sie in genau dieser Form
-nicht: Auf dem Proxy dieses Forks läuft seit Ende September 2026 derselbe Code
-unter anderen Bezeichnern und Gerätenamen.
+nicht: Auf dem Proxy dieses Forks laufen Bond-Anzeige und Neustart-Knopf seit
+Ende September 2026 als derselbe Code unter anderen Bezeichnern und
+Gerätenamen. Der Knopf **BLE-Bonds löschen** ist am Gerät nicht erprobt.
 
 ---
 
@@ -126,7 +128,8 @@ paired again.
 | bonds = 0 | will not come up | The proxy has no key (any more). Delete the old entry on the panel, then pair again ([pairing](../../docs/pairing.md)). |
 | bonds ≥ 1 | will not come up | The key is there; the bond is not the fault. See [known limitations](../../docs/limitations.md), "Reconnects can wedge". |
 
-**Neu starten** (restart) helps when the proxy itself is stuck. It does not
+**Neu starten** (restart) is meant for a proxy that is itself stuck (so far
+only cutting the ESP's power has been measured for that). It does not
 help when the panel has stopped accepting connections — restarting the ESP
 changes nothing then, and the panel has to be power-cycled.
 
@@ -140,5 +143,7 @@ alone.
 
 The YAML validates with ESPHome 2026.9.1 (`esphome config`) and compiles
 (`esphome compile`, ESP-IDF 5.5.5). It has not been flashed in exactly this
-form: this fork's proxy has been running the same code under other identifiers
-and device names since the end of September 2026.
+form: this fork's proxy has been running the bond display and the restart
+button as the same code under other identifiers and device names since the end
+of September 2026. The **BLE-Bonds löschen** button has not been tried on a
+device.

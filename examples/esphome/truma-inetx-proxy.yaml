@@ -63,8 +63,12 @@ button:
     disabled_by_default: true
     on_press:
       - lambda: |-
-          const int removed = truma_ble_remove_all_bonds();
-          ESP_LOGW("truma_bond", "BLE-Bonds geloescht: %d", removed);
+          const int requested = truma_ble_remove_all_bonds();
+          if (requested < 0) {
+            ESP_LOGW("truma_bond", "Bond-Liste nicht lesbar, nichts geloescht");
+          } else {
+            ESP_LOGW("truma_bond", "Loeschen von %d BLE-Bonds angefordert", requested);
+          }
 
 # --- BLE-Bond-Zustand sichtbar machen ---------------------------------------
 # Eine Messung je Minute, ein Schnappschuss, drei Entitaeten.
@@ -112,6 +116,11 @@ interval:
             return;
           }
           id(ble_bond_count).publish_state((float) snap.count);
-          id(ble_bond_list).publish_state(snap.count > 0 ? snap.list
-                                                         : std::string("keine"));
           id(ble_bond_present).publish_state(snap.count > 0);
+          if (snap.count == 0) {
+            id(ble_bond_list).publish_state("keine");
+          } else if (!snap.list.empty()) {
+            id(ble_bond_list).publish_state(snap.list);
+          }
+          // Anzahl > 0, aber Liste nicht lesbar: alten Listenwert stehen
+          // lassen statt einen leeren zu veroeffentlichen.

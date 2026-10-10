@@ -59,9 +59,9 @@ inline TrumaBondSnapshot truma_ble_bond_snapshot() {
   std::vector<esp_ble_bond_dev_t> dev_list(static_cast<size_t>(capacity));
 
   // 3. dev_num ist Ein- UND Ausgabe: hinein die Kapazitaet des Puffers, heraus
-  //    die Zahl der gefuellten Eintraege. Aeltere IDF-Staende deckeln dabei
-  //    nicht selbst, sondern schreiben die Gesamtzahl zurueck - deshalb wird
-  //    der Rueckgabewert unten gegen die Kapazitaet geklemmt.
+  //    die Zahl der gefuellten Eintraege. Zur Vorsicht wird der
+  //    Rueckgabewert unten gegen die Kapazitaet geklemmt, falls ein IDF-Stand
+  //    die Gesamtzahl statt der gefuellten Eintraege zurueckschreibt.
   int written = capacity;
   const esp_err_t err = esp_ble_get_bond_device_list(&written, dev_list.data());
   if (err != ESP_OK) {
@@ -74,7 +74,7 @@ inline TrumaBondSnapshot truma_ble_bond_snapshot() {
     written = capacity;
   }
 
-  // 4. Identitaetsadressen formatieren. Nichts davon wird gespeichert.
+  // 4. Adressen formatieren. Nichts davon wird gespeichert.
   std::string out;
   char buf[18];  // "AA:BB:CC:DD:EE:FF" plus Nullbyte
   for (int i = 0; i < written; i++) {
@@ -98,8 +98,10 @@ inline TrumaBondSnapshot truma_ble_bond_snapshot() {
   return snap;
 }
 
-// Loescht ALLE Bonds aus dem Bluedroid-Speicher (NVS) und liefert die Zahl der
-// geloeschten, oder einen negativen Wert, wenn die Liste nicht lesbar war.
+// Fordert das Loeschen ALLER Bonds aus dem Bluedroid-Speicher (NVS) an und
+// liefert die Zahl der angenommenen Loeschauftraege, oder einen negativen Wert,
+// wenn die Liste nicht lesbar war. esp_ble_remove_bond_device() arbeitet
+// asynchron: ESP_OK heisst "Auftrag angenommen", nicht "geloescht".
 // Nur fuer gezielte Neukopplungen gedacht: Danach kann
 // der Proxy das Panel erst wieder erreichen, wenn neu gekoppelt wurde.
 // Anders als "Factory reset" bleibt der Rest der NVS-Partition (WLAN usw.)
