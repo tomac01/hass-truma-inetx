@@ -208,6 +208,9 @@ class _Recorder:
     def __init__(self, bus, answers: dict[int, int] | None = None,
                  acks: set[int] | None = None) -> None:
         self.assigned_addr = APP_ADDR
+        # Das Flag, auf das ``run_startup`` wartet. Der echte Transport trägt
+        # es ebenfalls; gesetzt wird es allein von ``handle_frame``.
+        self.registered = False
         # Eine Verbindung, die nichts trägt, gilt dem Stack weiterhin als
         # verbunden; nur der Transport selbst räumt das ab.
         self.connected = True
@@ -312,6 +315,32 @@ def test_the_registration_response_teaches_us_the_address_we_send_from() -> None
     assert bus.assigned_addr == REASSIGNED, (
         f"der Bus hält weiter 0x{bus.assigned_addr:04X} für unsere Adresse"
     )
+    assert client.registered is True, (
+        "die Antwort ist angekommen, aber run_startup wartet weiter auf sie"
+    )
+
+
+def test_a_response_that_hands_back_the_address_we_hold_still_registers() -> None:
+    """Die Antwort zählt, nicht die Änderung der Adresse.
+
+    Ein Panel darf genau die Adresse zurückgeben, von der aus registriert
+    wurde (im Original-Repo an einem Fahrzeug gemessen, dort Issue #20).
+    ``run_startup`` wartet deshalb auf ``client.registered`` und nicht darauf,
+    dass ``assigned_addr`` sich ändert. Dies ist die einzige Stelle, die das
+    Flag setzt: Fehlt sie, läuft jede Sitzung nach dem Registrierungs-Timeout
+    in ``StartupFailed``, und kein anderer Test bemerkt es, weil die übrigen
+    Fakes das Flag selbst setzen.
+    """
+    bus, client = _registered()
+
+    SESSION.handle_frame(
+        bus, _frame(0x01, 0x02, {"addr": APP_ADDR}, src=PANEL), client
+    )
+
+    assert client.assigned_addr == APP_ADDR, client.assigned_addr
+    assert client.registered is True, (
+        "dieselbe Adresse zurückzubekommen gilt nicht als Antwort"
+    )
 
 
 def test_only_the_response_assigns_an_address_and_nothing_else_does() -> None:
@@ -343,6 +372,7 @@ def test_only_the_response_assigns_an_address_and_nothing_else_does() -> None:
         assert bus.assigned_addr == APP_ADDR, (
             f"{what} hat dem Bus 0x{bus.assigned_addr:04X} zugewiesen"
         )
+        assert client.registered is False, f"{what} gilt als Registrierungsantwort"
 
 
 def test_a_response_that_names_no_address_leaves_ours_alone() -> None:
@@ -361,6 +391,7 @@ def test_a_response_that_names_no_address_leaves_ours_alone() -> None:
     assert changed is False
     assert client.assigned_addr == APP_ADDR, client.assigned_addr
     assert bus.assigned_addr == APP_ADDR, bus.assigned_addr
+    assert client.registered is False, "eine Antwort ohne Adresse registriert nicht"
 
 
 def test_a_response_with_no_transport_behind_it_is_survivable() -> None:
